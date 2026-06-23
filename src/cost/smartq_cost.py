@@ -23,8 +23,8 @@ from typing import Iterable, List, Tuple
 SELLING_PRICE_MARKUP = 0.30
 
 # Defaults for the operating inputs (a typical month).
-DEFAULT_WORKING_DAYS = 26
-DEFAULT_SELLING_PAX = 100
+DEFAULT_WORKING_DAYS = 22
+DEFAULT_SELLING_PAX = 150
 
 MONTHS_PER_YEAR = 12
 

@@ -68,14 +68,15 @@ def test_smartq_cost_sums_lines():
 
 
 def test_smartq_cost_full_default_breakdown():
-    # End-to-end with the default shares at overall=100, 100 pax, 26 days.
+    # End-to-end with the default shares at overall=100, 150 pax, 22 days
+    # (selling amount = 130 * 150 * 22 = 429,000).
     sell_amt = selling_amount(selling_price(100.0), DEFAULT_SELLING_PAX,
                               DEFAULT_WORKING_DAYS)
     values = [
         line_abs(default, sell_amt, divisor)
         for _key, _label, default, _cadence, divisor in SMARTQ_COST_LINES
     ]
-    assert smartq_cost(values) == pytest.approx(58_023.33, abs=0.01)
+    assert smartq_cost(values) == pytest.approx(73_645.0, abs=0.01)
 
 
 # --- cost lines config -----------------------------------------------------
