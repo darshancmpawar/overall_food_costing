@@ -159,7 +159,7 @@ def render_vendor_cost(avg: float) -> None:
 
     st.divider()
     profit = _cols([2.4, 1.1, 1.4])
-    profit[0].markdown("**Profit (remaining)**")
+    profit[0].markdown("**Vendor Profit (remaining)**")
     profit[1].markdown(f"**{p_pct:.2f}%**")
     profit[2].markdown(f"**₹{p_abs:,.2f}**")
 

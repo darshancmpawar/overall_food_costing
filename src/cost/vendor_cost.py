@@ -63,18 +63,19 @@ def profit_status(p_pct: float) -> ProfitStatus:
     if p_pct < MIN_HEALTHY_PROFIT_PCT:
         return ProfitStatus(
             "error",
-            f"Profit is {p_pct:.2f}% — below the {MIN_HEALTHY_PROFIT_PCT:.0f}% "
-            "minimum. Lower the cost shares above before committing to these "
-            "numbers.",
+            f"Vendor profit is {p_pct:.2f}% — below the "
+            f"{MIN_HEALTHY_PROFIT_PCT:.0f}% minimum. Lower the cost shares "
+            "above before committing to these numbers.",
         )
     if p_pct > MAX_EXPECTED_PROFIT_PCT:
         return ProfitStatus(
             "warning",
-            f"Profit is {p_pct:.2f}% — above {MAX_EXPECTED_PROFIT_PCT:.0f}%. "
-            "Double-check the cost shares; this margin looks high.",
+            f"Vendor profit is {p_pct:.2f}% — above "
+            f"{MAX_EXPECTED_PROFIT_PCT:.0f}%. Double-check the cost shares; "
+            "this margin looks high.",
         )
     return ProfitStatus(
         "ok",
-        f"Profit is {p_pct:.2f}% — within the healthy "
+        f"Vendor profit is {p_pct:.2f}% — within the healthy "
         f"{MIN_HEALTHY_PROFIT_PCT:.0f}–{MAX_EXPECTED_PROFIT_PCT:.0f}% range.",
     )
