@@ -13,6 +13,8 @@ from src.cost.smartq_cost import (
     selling_amount,
     selling_price,
     smartq_cost,
+    smartq_profit,
+    smartq_profit_pct,
 )
 
 
@@ -77,6 +79,25 @@ def test_smartq_cost_full_default_breakdown():
         for _key, _label, default, _cadence, divisor in SMARTQ_COST_LINES
     ]
     assert smartq_cost(values) == pytest.approx(73_645.0, abs=0.01)
+
+
+# --- smartq_profit ---------------------------------------------------------
+
+def test_smartq_profit_value():
+    # revenue 429,000 - buying 330,000 - cost 73,645 = 25,355
+    assert smartq_profit(429_000.0, 330_000.0, 73_645.0) == pytest.approx(25_355.0)
+
+
+def test_smartq_profit_can_be_negative():
+    assert smartq_profit(100.0, 80.0, 50.0) == pytest.approx(-30.0)
+
+
+def test_smartq_profit_pct_of_selling_amount():
+    assert smartq_profit_pct(25_355.0, 429_000.0) == pytest.approx(5.91, abs=0.01)
+
+
+def test_smartq_profit_pct_zero_selling_is_safe():
+    assert smartq_profit_pct(100.0, 0.0) == 0.0
 
 
 # --- cost lines config -----------------------------------------------------

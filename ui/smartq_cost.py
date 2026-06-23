@@ -24,6 +24,8 @@ from src.cost.smartq_cost import (
     selling_amount,
     selling_price,
     smartq_cost,
+    smartq_profit,
+    smartq_profit_pct,
 )
 
 
@@ -153,8 +155,14 @@ def render_smartq_cost(overall_per_plate: float) -> None:
     total = smartq_cost(
         ss[f"sq_{key}_abs"] for key, _l, _d, _c, _dv in SMARTQ_COST_LINES
     )
+    profit = smartq_profit(sell_amt, buy_amt, total)
+    profit_margin = smartq_profit_pct(profit, sell_amt)
 
     st.divider()
-    st.metric("SmartQ Cost", f"₹{total:,.2f}",
-              help="Sum of every operating line above (monthly basis; the "
-                   "yearly Food Licenses line is included at 1/12).")
+    out1, out2 = st.columns(2)
+    out1.metric("SmartQ Cost", f"₹{total:,.2f}",
+                help="Sum of every operating line above (monthly basis; the "
+                     "yearly Food Licenses line is included at 1/12).")
+    out2.metric("SmartQ Profit", f"₹{profit:,.2f}", delta=f"{profit_margin:.2f}%",
+                help="Selling amount − buying amount − SmartQ cost; the delta "
+                     "is profit as a % of the selling amount.")

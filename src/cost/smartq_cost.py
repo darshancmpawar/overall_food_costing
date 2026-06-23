@@ -80,3 +80,20 @@ def line_pct(abs_value: float, sell_amount: float,
 def smartq_cost(line_values: Iterable[float]) -> float:
     """SmartQ cost = sum of every operating line's rupee value."""
     return round(sum(line_values), 2)
+
+
+def smartq_profit(sell_amount: float, buy_amount: float,
+                  total_cost: float) -> float:
+    """Net SmartQ profit over the period: revenue, less the cost of the plates
+    bought from the vendor, less SmartQ's own operating cost."""
+    return round(sell_amount - buy_amount - total_cost, 2)
+
+
+def smartq_profit_pct(profit: float, sell_amount: float) -> float:
+    """SmartQ profit as a percentage of revenue (the selling amount).
+
+    Returns ``0.0`` when there's no revenue so the UI stays finite.
+    """
+    if sell_amount <= 0:
+        return 0.0
+    return profit / sell_amount * 100.0
