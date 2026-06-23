@@ -1,19 +1,15 @@
-"""Tests for the overall operating-cost model (src.cost.overall_cost)."""
+"""Tests for the shared overall-cost scaling primitives
+(src.cost.overall_cost)."""
 
 import pytest
 
 from src.cost.overall_cost import (
     DEFAULT_FOOD_COST_PCT,
-    MAX_EXPECTED_PROFIT_PCT,
-    MIN_HEALTHY_PROFIT_PCT,
-    VENDOR_COST_LINES,
     abs_to_pct,
     average_food_cost,
     day_costs_from_cost_data,
     overall_food_cost,
     pct_to_abs,
-    profit_pct,
-    profit_status,
 )
 
 
@@ -68,41 +64,6 @@ def test_pct_abs_round_trip():
     overall = 222.22
     for pct in (25.0, 5.0, 3.0, 2.0):
         assert abs_to_pct(pct_to_abs(pct, overall), overall) == pytest.approx(pct, abs=0.01)
-
-
-# --- profit_pct ------------------------------------------------------------
-
-def test_profit_pct_is_remainder():
-    vendor = {key: default for key, _label, default in VENDOR_COST_LINES}
-    # Defaults: 45 food + 45 vendor -> 10 profit.
-    assert profit_pct(DEFAULT_FOOD_COST_PCT, vendor) == pytest.approx(10.0)
-
-
-def test_profit_pct_can_go_negative_when_over_allocated():
-    assert profit_pct(45.0, {"a": 40.0, "b": 30.0}) == pytest.approx(-15.0)
-
-
-def test_vendor_defaults_sum_to_45():
-    assert sum(d for _k, _l, d in VENDOR_COST_LINES) == pytest.approx(45.0)
-
-
-# --- profit_status ---------------------------------------------------------
-
-def test_profit_status_ok_band():
-    assert profit_status(MIN_HEALTHY_PROFIT_PCT).level == "ok"
-    assert profit_status(7.0).level == "ok"
-    assert profit_status(MAX_EXPECTED_PROFIT_PCT).level == "ok"
-
-
-def test_profit_status_error_below_minimum():
-    assert profit_status(4.99).level == "error"
-    assert profit_status(0.0).level == "error"
-    assert profit_status(-5.0).level == "error"
-
-
-def test_profit_status_warning_above_expected():
-    assert profit_status(10.01).level == "warning"
-    assert profit_status(25.0).level == "warning"
 
 
 # --- day_costs_from_cost_data ----------------------------------------------
