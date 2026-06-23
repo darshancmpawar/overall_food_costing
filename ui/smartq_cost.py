@@ -40,9 +40,9 @@ def _cols(weights):
 def _cadence_badge(cadence: str) -> str:
     """Small pill marking a line as monthly or yearly."""
     if cadence == "yearly":
-        bg, fg = "rgba(251,191,36,0.15)", "#fbbf24"
+        bg, fg = "rgba(242,160,61,0.16)", "#F2A03D"
     else:
-        bg, fg = "rgba(52,211,153,0.12)", "#6ee7b7"
+        bg, fg = "rgba(143,214,166,0.14)", "#8FD6A6"
     return (
         f'<span style="display:inline-block;padding:2px 8px;border-radius:99px;'
         f'font-size:0.62rem;font-weight:700;text-transform:uppercase;'

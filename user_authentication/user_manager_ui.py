@@ -12,9 +12,9 @@ from user_authentication.models import ROLE_SUPER_ADMIN
 
 
 _ROLE_COLORS = {
-    "super_admin": ("#3b1114", "#fca5a5"),
-    "admin":       ("#2a1508", "#fdba74"),
-    "user":        ("#0f2a1d", "#86efac"),
+    "super_admin": ("#2E1410", "#EF8A6A"),  # chili
+    "admin":       ("#2A1E0E", "#F2A03D"),  # saffron
+    "user":        ("#14271C", "#8FD6A6"),  # coriander
 }
 
 
@@ -30,36 +30,36 @@ def render_user_manager():
     st.markdown("""
     <style>
         .um-section {
-            background: #111113; border: 1px solid #27272a;
+            background: #211B14; border: 1px solid #3A2F22;
             border-radius: 14px; padding: 1.25rem 1.5rem;
             margin-bottom: 1rem;
         }
         .um-section-title {
-            font-size: 1rem; font-weight: 700; color: #fafafa;
+            font-size: 1rem; font-weight: 700; color: #F7F1E6;
             margin: 0 0 0.15rem; letter-spacing: -0.2px;
         }
         .um-section-desc {
-            font-size: 0.75rem; color: #71717a; margin: 0 0 1rem;
+            font-size: 0.75rem; color: #9A8C77; margin: 0 0 1rem;
         }
         .user-row {
             display: flex; align-items: center; gap: 0.75rem;
             padding: 0.65rem 0.85rem;
-            border-bottom: 1px solid #1c1c1f;
+            border-bottom: 1px solid #2A2219;
             transition: background 0.15s ease;
         }
         .user-row:last-child { border-bottom: none; }
-        .user-row:hover { background: #18181b; border-radius: 8px; }
+        .user-row:hover { background: #2A2219; border-radius: 8px; }
         .user-avatar-sm {
             width: 34px; height: 34px; border-radius: 50%;
             display: flex; align-items: center; justify-content: center;
-            font-size: 0.7rem; font-weight: 700; color: #fff; flex-shrink: 0;
+            font-size: 0.7rem; font-weight: 700; color: #241606; flex-shrink: 0;
         }
         .user-info { flex: 1; min-width: 0; }
         .user-info-name {
-            font-size: 0.85rem; font-weight: 600; color: #fafafa;
+            font-size: 0.85rem; font-weight: 600; color: #F7F1E6;
         }
         .user-info-email {
-            font-size: 0.72rem; color: #71717a;
+            font-size: 0.72rem; color: #9A8C77;
         }
         .role-badge {
             display: inline-block; padding: 2px 8px;
@@ -135,13 +135,13 @@ def render_user_manager():
         return
 
     for u in users:
-        bg, fg = _ROLE_COLORS.get(u.role, ("#18181b", "#a1a1aa"))
+        bg, fg = _ROLE_COLORS.get(u.role, ("#2A2219", "#C9BCA8"))
         grad_colors = {
-            "super_admin": "#ef4444, #dc2626",
-            "admin": "#f59e0b, #d97706",
-            "user": "#22c55e, #16a34a",
+            "super_admin": "#EF8A6A, #C8472B",
+            "admin": "#F2A03D, #D9822B",
+            "user": "#8FD6A6, #4f9e6f",
         }
-        grad = grad_colors.get(u.role, "#6366f1, #8b5cf6")
+        grad = grad_colors.get(u.role, "#F2A03D, #C8472B")
         initials = ''.join(w[0] for w in u.profile_name.split()[:2]).upper() if u.profile_name else '?'
 
         col_info, col_action = st.columns([4, 1])

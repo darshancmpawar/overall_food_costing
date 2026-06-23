@@ -48,7 +48,7 @@ def render_theme_editor(
         col_day, col_select, col_tag = st.columns([1.2, 2, 1.5])
         with col_day:
             st.markdown(
-                f'<p style="font-weight:700;color:#fafafa;margin:0.5rem 0;'
+                f'<p style="font-weight:700;color:#F7F1E6;margin:0.5rem 0;'
                 f'font-size:0.85rem;">{day_display}</p>',
                 unsafe_allow_html=True,
             )
@@ -68,7 +68,7 @@ def render_theme_editor(
             updated[day] = chosen
 
         with col_tag:
-            bg, fg = THEME_TAG_COLORS.get(chosen, ('#27272a', '#71717a'))
+            bg, fg = THEME_TAG_COLORS.get(chosen, ('#2A2219', '#9A8C77'))
             icon = THEME_ICONS.get(chosen, '')
             is_override = (chosen != default_val)
             border = f' border:1px solid {fg};' if is_override else ''
@@ -89,7 +89,7 @@ def render_theme_editor(
         parts = [f"{d.capitalize()}: {_THEME_DISPLAY.get(t, t)}"
                  for d, t in overrides.items()]
         st.markdown(
-            f'<p style="font-size:0.72rem;color:#fbbf24;margin:0.5rem 0 0;">'
+            f'<p style="font-size:0.72rem;color:#E8C24A;margin:0.5rem 0 0;">'
             f'Overrides: {" | ".join(parts)}</p>',
             unsafe_allow_html=True,
         )
