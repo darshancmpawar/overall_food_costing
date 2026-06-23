@@ -12,17 +12,29 @@ live in its own module so the two costing types stay independent.
 
 import streamlit as st
 
-from src.cost.overall_cost import average_food_cost, day_costs_from_cost_data
+from src.cost.overall_cost import (
+    DEFAULT_FOOD_COST_PCT,
+    average_food_cost,
+    day_costs_from_cost_data,
+    overall_food_cost,
+)
 from ui.smartq_cost import render_smartq_cost
 from ui.vendor_cost import render_vendor_cost
 
 
 def _render_panel(avg: float) -> None:
+    # The overall cost per plate is the bridge between the two models: the
+    # vendor tab owns the food-cost share (vc_food_cost_pct), and SmartQ
+    # prices off the resulting overall cost. Read the share from session so
+    # SmartQ tracks any edit the user makes in the vendor tab.
+    overall = overall_food_cost(
+        avg, st.session_state.get("vc_food_cost_pct", DEFAULT_FOOD_COST_PCT)
+    )
     vendor_tab, smartq_tab = st.tabs(["Vendor Cost", "SmartQ Costing"])
     with vendor_tab:
         render_vendor_cost(avg)
     with smartq_tab:
-        render_smartq_cost(avg)
+        render_smartq_cost(overall)
 
 
 def render_overall_estimated_cost(cost_data: dict) -> None:
