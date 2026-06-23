@@ -178,7 +178,11 @@ def extract_cost_data(raw_solution: Dict[str, Any]) -> Dict[str, Any]:
     """Pull cost fields out of the enriched API solution.
 
     Returns {date_str: {items: {slot_id: {cost_per_person_display, grammage_display}},
-                        day_cost_display, day_qty_display}}.
+                        day_cost_total, day_cost_display, day_qty_display}}.
+
+    ``day_cost_total`` is the numeric per-person cost (the overall-cost
+    estimator averages it); ``day_cost_display`` is its rupee string for the
+    footer row.
 
     Returns an empty dict when no cost data is present (e.g. Excel has no
     cost_per_kg / grammage_per_serving columns) so callers can skip the
@@ -204,6 +208,7 @@ def extract_cost_data(raw_solution: Dict[str, Any]) -> Dict[str, Any]:
                 has_any_cost = True
         cost_data[day_key] = {
             "items": items_cost,
+            "day_cost_total": day_data.get("day_cost_total"),
             "day_cost_display": day_data.get("day_cost_display", ""),
             "day_qty_display": day_data.get("day_qty_display", ""),
         }
