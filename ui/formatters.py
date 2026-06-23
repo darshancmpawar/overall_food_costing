@@ -32,13 +32,15 @@ _COLOR_MAP: Dict[str, Tuple[str, str, str]] = {
 }
 
 
-# Theme badge colors keyed by theme name: (background, foreground, icon)
+# Day-theme badge colours keyed by theme name: (background, foreground).
+# Mapped to the food each day actually serves so the grid reads at a glance,
+# and harmonised to the warm spice palette in ui/styles.py.
 THEME_TAG_COLORS = {
-    'mix':     ('#0f2a1d', '#86efac'),
-    'chinese': ('#2a1508', '#fdba74'),
-    'biryani': ('#3b1114', '#fca5a5'),
-    'south':   ('#0f1a2e', '#93c5fd'),
-    'north':   ('#1e0a3a', '#c4b5fd'),
+    'mix':     ('#14271C', '#8FD6A6'),  # coriander green (South + North mix)
+    'chinese': ('#0F2622', '#7FCFC0'),  # scallion / jade (Indo-Chinese)
+    'biryani': ('#2E2009', '#F4A53C'),  # saffron rice
+    'south':   ('#292509', '#EAD27A'),  # turmeric / coconut
+    'north':   ('#2E1410', '#EF8A6A'),  # tandoori paprika
 }
 
 THEME_ICONS = {

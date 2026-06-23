@@ -39,7 +39,7 @@ def render_slot_editor(
 
     if selected:
         st.markdown(
-            f'<p style="font-size:0.72rem;color:#a1a1aa;margin:0.25rem 0 0;">'
+            f'<p style="font-size:0.72rem;color:#9A8C77;margin:0.25rem 0 0;">'
             f'{len(selected)} of {len(toggleable)} categories active</p>',
             unsafe_allow_html=True,
         )

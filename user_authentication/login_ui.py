@@ -14,6 +14,8 @@ from user_authentication.session import login_user
 
 def render_login_form(api_base_url: str = "http://localhost:5000"):
     """Render a centered login form. Returns True if user just logged in."""
+    # Warm spice palette — matches the tokens in ui/styles.py (injected
+    # globally before this form renders).
     st.markdown("""
     <style>
         .login-wrapper {
@@ -23,33 +25,35 @@ def render_login_form(api_base_url: str = "http://localhost:5000"):
         .login-card {
             width: 100%; max-width: 380px; margin: 0 auto;
             padding: 2.5rem 2rem 2rem;
-            background: #111113;
-            border: 1px solid #27272a;
+            background: #211B14;
+            border: 1px solid #3A2F22;
             border-radius: 16px;
-            box-shadow: 0 8px 40px rgba(0,0,0,0.5), 0 0 80px rgba(124,58,237,0.06);
+            box-shadow: 0 16px 44px rgba(0,0,0,0.55), 0 0 90px rgba(242,160,61,0.08);
         }
         .login-brand {
             text-align: center; margin-bottom: 2rem;
         }
         .login-brand-icon {
-            width: 52px; height: 52px; margin: 0 auto 0.75rem;
-            border-radius: 14px;
-            background: linear-gradient(135deg, #7c3aed, #a78bfa);
+            width: 56px; height: 56px; margin: 0 auto 0.85rem;
+            border-radius: 15px;
+            background: linear-gradient(140deg, #F2A03D, #C8472B);
             display: flex; align-items: center; justify-content: center;
-            font-size: 1.4rem;
-            box-shadow: 0 0 30px rgba(124,58,237,0.3);
+            font-size: 1.5rem;
+            box-shadow: 0 0 28px rgba(242,160,61,0.30);
         }
         .login-brand h1 {
-            margin: 0; font-size: 1.35rem; font-weight: 800;
-            color: #fafafa; letter-spacing: -0.5px;
+            margin: 0;
+            font-family: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+            font-size: 1.55rem; font-weight: 600;
+            color: #F7F1E6; letter-spacing: -0.3px;
         }
         .login-brand p {
-            margin: 0.25rem 0 0; font-size: 0.8rem; color: #71717a;
+            margin: 0.3rem 0 0; font-size: 0.8rem; color: #9A8C77;
             font-weight: 400;
         }
         .login-footer {
             text-align: center; margin-top: 1.5rem;
-            font-size: 0.7rem; color: #3f3f46;
+            font-size: 0.7rem; color: #6E6151;
         }
     </style>
     """, unsafe_allow_html=True)

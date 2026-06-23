@@ -22,37 +22,38 @@ def _inject_editor_css():
             margin-bottom: 1.75rem;
         }
         .editor-title {
-            font-size: 1.55rem; font-weight: 800; color: #fafafa;
-            letter-spacing: -0.5px; margin: 0; line-height: 1.2;
+            font-family: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+            font-size: 1.7rem; font-weight: 600; color: #F7F1E6;
+            letter-spacing: -0.3px; margin: 0; line-height: 1.15;
         }
         .editor-subtitle {
-            font-size: 0.8rem; color: #71717a; margin: 0.15rem 0 0;
+            font-size: 0.8rem; color: #9A8C77; margin: 0.15rem 0 0;
             font-weight: 400;
         }
         .section-card {
-            background: #111113; border: 1px solid #27272a;
+            background: #211B14; border: 1px solid #3A2F22;
             border-radius: 14px; padding: 1.25rem 1.5rem;
             margin-bottom: 1rem;
         }
         .section-title {
-            font-size: 1rem; font-weight: 700; color: #fafafa;
+            font-size: 1rem; font-weight: 700; color: #F7F1E6;
             margin: 0 0 0.15rem; letter-spacing: -0.2px;
         }
         .section-desc {
-            font-size: 0.75rem; color: #71717a; margin: 0 0 1rem;
+            font-size: 0.75rem; color: #9A8C77; margin: 0 0 1rem;
         }
         .status-pill {
             display: inline-block; padding: 2px 8px;
             border-radius: 99px; font-size: 0.68rem; font-weight: 600;
         }
-        .status-pill.match { background: #0f2a1d; color: #86efac; }
-        .status-pill.new   { background: #2a1508; color: #fdba74; }
-        .status-pill.warn  { background: #2a1508; color: #fdba74; }
+        .status-pill.match { background: #14271C; color: #8FD6A6; }
+        .status-pill.new   { background: #2A2410; color: #E8C24A; }
+        .status-pill.warn  { background: #2A2410; color: #E8C24A; }
         .changes-indicator {
             display: inline-flex; align-items: center; gap: 0.35rem;
-            padding: 0.3rem 0.75rem; background: rgba(251,191,36,0.08);
-            border: 1px solid rgba(251,191,36,0.15); border-radius: 99px;
-            font-size: 0.75rem; color: #fbbf24; font-weight: 500;
+            padding: 0.3rem 0.75rem; background: rgba(232,194,74,0.08);
+            border: 1px solid rgba(232,194,74,0.20); border-radius: 99px;
+            font-size: 0.75rem; color: #E8C24A; font-weight: 500;
             margin-bottom: 0.75rem;
         }
     </style>
