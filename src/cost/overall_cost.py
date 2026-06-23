@@ -1,5 +1,5 @@
 """
-Overall operating-cost model for a generated menu plan.
+Shared scaling primitives for the overall operating-cost estimate.
 
 The solver gives a per-person food cost for each day. Averaged across the plan
 that figure is the *food cost* — but food is only one slice of what it costs to
@@ -9,38 +9,21 @@ fully-loaded cost, so scaling the average food cost up from that 45% share to
 
     overall = average_food_cost / (food_cost_pct / 100)
 
-Every other line (manpower, electricity, …) is then expressed as a share of
-that overall cost, and profit is whatever share is left over.
+Both costing models build on this: the vendor-cost model
+(``src.cost.vendor_cost``) breaks the overall cost into operating lines, and
+the SmartQ model (``src.cost.smartq_cost``) will layer its own model on top.
+The percentage <-> rupee conversion helpers live here too since both models
+share them.
 
 This module is intentionally pure — no Streamlit, no I/O — so the arithmetic is
-unit-testable. The Streamlit layer (``ui/overall_cost.py``) renders it and
-wires up the two-way percentage <-> rupee inputs.
+unit-testable. The Streamlit layer renders it.
 """
 
 import re
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 # Default food-cost share of the fully-loaded operating cost.
 DEFAULT_FOOD_COST_PCT = 45.0
-
-# Vendor / operating cost lines: (stable_key, display_label, default_share_pct).
-# ``stable_key`` is used to build Streamlit widget keys, so it must not change
-# once shipped (changing it resets a live session's inputs to the defaults).
-# The order here is the on-screen order. The default shares sum to 45%, which
-# leaves the default profit at 100 - 45 (food) - 45 (vendor) = 10%.
-VENDOR_COST_LINES: List[Tuple[str, str, float]] = [
-    ("manpower", "Manpower", 25.0),
-    ("electricity", "Electricity & Water", 5.0),
-    ("consumables", "Consumables", 3.0),
-    ("transport", "Transport", 2.0),
-    ("admin", "Admin", 5.0),
-    ("depreciation", "Depreciation", 5.0),
-]
-
-# Profit guardrails, in percentage points of the overall cost.
-MIN_HEALTHY_PROFIT_PCT = 5.0
-MAX_EXPECTED_PROFIT_PCT = 10.0
 
 
 def _parse_money(value: Any) -> Optional[float]:
@@ -115,49 +98,3 @@ def abs_to_pct(abs_value: float, overall: float) -> float:
     if overall <= 0:
         return 0.0
     return abs_value / overall * 100.0
-
-
-def profit_pct(food_cost_pct: float, vendor_pcts: Dict[str, float]) -> float:
-    """Profit is whatever share of the 100% is left after food + vendors.
-
-    May be negative when the lines are over-allocated; the UI surfaces that
-    as an error rather than clamping it, so the number stays honest.
-    """
-    return 100.0 - food_cost_pct - sum(vendor_pcts.values())
-
-
-@dataclass(frozen=True)
-class ProfitStatus:
-    """Validation verdict for a profit share. ``level`` is one of
-    ``"ok"`` / ``"warning"`` / ``"error"`` so the UI can pick the right
-    Streamlit alert box."""
-
-    level: str
-    message: str
-
-
-def profit_status(p_pct: float) -> ProfitStatus:
-    """Classify a profit percentage against the healthy band.
-
-    < 5%  -> error (too thin / over-allocated)
-    > 10% -> warning (verify; the margin looks high)
-    else  -> ok
-    """
-    if p_pct < MIN_HEALTHY_PROFIT_PCT:
-        return ProfitStatus(
-            "error",
-            f"Profit is {p_pct:.2f}% — below the {MIN_HEALTHY_PROFIT_PCT:.0f}% "
-            "minimum. Lower the cost shares above before committing to these "
-            "numbers.",
-        )
-    if p_pct > MAX_EXPECTED_PROFIT_PCT:
-        return ProfitStatus(
-            "warning",
-            f"Profit is {p_pct:.2f}% — above {MAX_EXPECTED_PROFIT_PCT:.0f}%. "
-            "Double-check the cost shares; this margin looks high.",
-        )
-    return ProfitStatus(
-        "ok",
-        f"Profit is {p_pct:.2f}% — within the healthy "
-        f"{MIN_HEALTHY_PROFIT_PCT:.0f}–{MAX_EXPECTED_PROFIT_PCT:.0f}% range.",
-    )
