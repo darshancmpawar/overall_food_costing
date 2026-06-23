@@ -39,6 +39,7 @@ from ui.formatters import (
 )
 from ui.styles import STYLES
 from ui.backend_probe import health_check, pick_backend_port
+from ui.overall_cost import render_overall_estimated_cost
 from customisation.main import render_customisation_editor
 
 
@@ -611,6 +612,14 @@ if plan and plan_dates:
             st.rerun()
 
     st.markdown("")
+
+    # Overall estimated cost — scales the average per-plate food cost up to a
+    # fully-loaded operating cost and breaks it into editable operating lines.
+    # Only meaningful once the plan is costed, so it's gated on cost_data.
+    _oc_cost_data = st.session_state.get("cost_data", {})
+    if _oc_cost_data:
+        render_overall_estimated_cost(_oc_cost_data)
+        st.markdown("")
 
     # Action buttons
     c1, c2, c3, _ = st.columns([1, 1, 1, 3])
