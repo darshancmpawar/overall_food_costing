@@ -200,7 +200,10 @@ STYLES = """
        METRIC CARDS  (custom .metric-card grid)
        ================================================================ */
     .metrics-grid {
-        display: grid; grid-template-columns: repeat(4, 1fr);
+        display: grid;
+        /* auto-fit rather than a fixed 4 so the Counter card added for
+           multi-line clients wraps instead of squeezing the row. */
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
         gap: 0.8rem; margin-bottom: 1.75rem;
     }
     .metric-card {

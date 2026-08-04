@@ -156,3 +156,35 @@ class TestBumpVersionFallback:
             "without concurrency check" in rec.message
             for rec in caplog.records
         )
+
+
+class TestClientRowFallback:
+    """A deployment that hasn't applied the counters migration must get a
+    pointed error, not a PostgREST 500 leaking through the API."""
+
+    def test_missing_counters_columns_degrade_with_a_clear_error(
+        self, monkeypatch, caplog,
+    ):
+        loader, sb = _loader_with_mock_supabase(monkeypatch)
+
+        def _select(*args, **kwargs):
+            chain = MagicMock()
+            if args and args[0].startswith("name, counters"):
+                chain.eq.return_value.maybe_single.return_value.execute.side_effect = (
+                    _undefined_column_err()
+                )
+            else:
+                # Existence probe: the client row itself is fine.
+                resp = MagicMock()
+                resp.data = {"name": "Cargil"}
+                chain.eq.return_value.maybe_single.return_value.execute.return_value = resp
+            return chain
+
+        sb.table.return_value.select = _select
+        caplog.set_level(logging.ERROR, logger="src.client.client_config")
+
+        with pytest.raises(ValueError, match="no counters configured"):
+            loader.get_client("Cargil")
+        assert any(
+            "counters-schema columns" in rec.message for rec in caplog.records
+        )

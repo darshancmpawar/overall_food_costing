@@ -91,8 +91,13 @@ class TestSolverInputsPicksCorrectWindow:
 
         captured = {}
 
-        def _capture(df, client_name, start_date, weekday_dates, window_days=None):
+        def _capture(
+            df, client_name, start_date, weekday_dates, window_days=None,
+            counter_name=None, cooldown_days=20,
+        ):
             captured["window_days"] = window_days
+            captured["counter_name"] = counter_name
+            captured["cooldown_days"] = cooldown_days
             # Return empty history so the rest of the solve can proceed.
             import pandas as pd
             from src.history import HistoryManager
@@ -112,7 +117,7 @@ class TestSolverInputsPicksCorrectWindow:
 
         monkeypatch.setattr(
             api_app, "_rules_and_skip_for_client",
-            lambda name, dates: ([_DeepRule()], set()),
+            lambda name, dates, item_cooldown_days=None: ([_DeepRule()], set()),
         )
 
         import api.auth as api_auth
@@ -133,3 +138,8 @@ class TestSolverInputsPicksCorrectWindow:
         assert captured["window_days"] == 105, (
             f"expected widened window (90+slack), got {captured['window_days']}"
         )
+        # The client's counter and its item_cooldown_days must reach the
+        # history layer too — cooldowns are per serving line, and the
+        # window above is sized from the same number.
+        assert captured["counter_name"] == "Counter 1"
+        assert captured["cooldown_days"] == 20

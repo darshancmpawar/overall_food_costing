@@ -2,8 +2,14 @@
 Customisation Editor -- Main page that orchestrates all editor sections.
 
 Two flows:
-  Select Existing: select client -> edit categories/frequency/themes -> Save | Reset
-  Create New:      enter name -> pick categories/frequency/themes -> Create Client | Reset Setup
+  Select Existing: select client + counter -> edit settings/categories/
+                   frequency/themes -> Save | Reset | Delete
+  Create New:      enter name -> pick categories/frequency/themes ->
+                   Create Client | Reset Setup
+
+A client has one or more *counters* (serving lines), each with its own
+category list, per-slot counts, and day themes. The editor works on one
+counter at a time and can add or remove them.
 
 Called from app.py when st.session_state.view == "editor".
 """
@@ -13,6 +19,8 @@ from ui.api_client import MenuApiClient
 from customisation.slot_editor import render_slot_editor
 from customisation.multi_slot_editor import render_multi_slot_editor
 from customisation.theme_editor import render_theme_editor
+
+_NEW_COUNTER_SENTINEL = "+ Add new counter"
 
 def _inject_editor_css():
     st.markdown("""
@@ -60,6 +68,61 @@ def _inject_editor_css():
     """, unsafe_allow_html=True)
 
 
+def _render_client_settings(current: dict, client_key: str) -> dict:
+    """Render the client-level settings card. Returns the edited values.
+
+    These live on the client row rather than a counter: every serving line
+    shares the same city, weekend calendar, cooldown window, and item
+    source pools.
+    """
+    st.markdown(
+        '<div class="section-card">'
+        '<p class="section-title">Client Settings</p>'
+        '<p class="section-desc">Shared by every counter for this client</p>',
+        unsafe_allow_html=True,
+    )
+    col_city, col_cooldown, col_weekend = st.columns([2, 1.4, 1.4])
+    with col_city:
+        city = st.text_input(
+            "City", value=current.get('city', ''),
+            key=f"editor_city_{client_key}",
+            placeholder="e.g. Bangalore",
+        ).strip()
+    with col_cooldown:
+        cooldown = st.number_input(
+            "Item cooldown (days)",
+            min_value=0, max_value=120,
+            value=int(current.get('item_cooldown_days') or 20),
+            step=1,
+            key=f"editor_cooldown_{client_key}",
+            help="An item served within this many days can't repeat.",
+        )
+    with col_weekend:
+        serve_weekends = st.checkbox(
+            "Serve weekends",
+            value=bool(current.get('serve_weekends')),
+            key=f"editor_weekends_{client_key}",
+            help="When on, Sat/Sun count as service days and get their own "
+                 "day themes.",
+        )
+    pools_raw = st.text_input(
+        "Source pools (comma-separated)",
+        value=", ".join(current.get('source_pools') or []),
+        key=f"editor_pools_{client_key}",
+        help="Extra item collections this client may draw from, on top of "
+             "the shared ontology. Leave empty for shared items only.",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+    return {
+        'city': city,
+        'item_cooldown_days': int(cooldown),
+        'serve_weekends': bool(serve_weekends),
+        'source_pools': [
+            p.strip() for p in pools_raw.split(',') if p.strip()
+        ],
+    }
+
+
 def render_customisation_editor(api: MenuApiClient):
     """Main entry point for the customisation editor view."""
     _inject_editor_css()
@@ -96,7 +159,10 @@ def render_customisation_editor(api: MenuApiClient):
     const_slots = metadata.get('const_slots', [])
     default_theme_map = metadata.get('default_theme_map', {})
     available_themes = metadata.get('available_themes', [])
-    menu_categories = metadata.get('menu_categories', {})
+    weekday_names = metadata.get('weekday_names') or [
+        'monday', 'tuesday', 'wednesday', 'thursday', 'friday',
+    ]
+    all_day_names = metadata.get('all_day_names') or weekday_names
 
     # ============================================================
     # Section 1: Client Management
@@ -140,20 +206,73 @@ def render_customisation_editor(api: MenuApiClient):
 
     # For Select Existing: load config from DB
     # For Create New: use defaults
+    selected_counter = None
+    is_new_counter = False
     if not is_create_mode:
         try:
             config = api.get_client_config(selected_client)
         except Exception as e:
             st.error(f"Failed to load config for {selected_client}: {e}")
             return
-        current_active = config.get('active_base_slots', [])
-        current_counts = config.get('slot_counts', {})
-        current_theme = config.get('theme_map', dict(default_theme_map))
+
+        counters = config.get('counters') or []
+        counter_names = [c.get('name', '') for c in counters]
+
+        # --- Counter picker ---
+        st.markdown(
+            '<div class="section-card">'
+            '<p class="section-title">Counter</p>'
+            '<p class="section-desc">Each counter is a separate serving line '
+            'with its own categories, frequency, and day themes</p>',
+            unsafe_allow_html=True,
+        )
+        counter_choice = st.selectbox(
+            "Counter",
+            counter_names + [_NEW_COUNTER_SENTINEL],
+            key=f"editor_counter_select_{selected_client}",
+            label_visibility="collapsed",
+        )
+        is_new_counter = (counter_choice == _NEW_COUNTER_SENTINEL)
+        if is_new_counter:
+            selected_counter = st.text_input(
+                "New counter name",
+                key=f"editor_new_counter_name_{selected_client}",
+                placeholder="e.g. South Indian",
+            ).strip()
+        else:
+            selected_counter = counter_choice
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if is_new_counter and not selected_counter:
+            st.info("Enter a name for the new counter to start configuring it.")
+            return
+
+        counter_cfg = next(
+            (c for c in counters if c.get('name') == selected_counter), {},
+        )
+        if is_new_counter:
+            current_active = [
+                s for s in all_base_slots if s not in set(const_slots)
+            ]
+            current_counts = {s: 1 for s in all_base_slots}
+            current_theme = dict(default_theme_map)
+        else:
+            current_active = counter_cfg.get('active_base_slots', [])
+            current_counts = counter_cfg.get('slot_counts', {})
+            current_theme = counter_cfg.get(
+                'theme_map', dict(default_theme_map),
+            )
         # Optimistic-concurrency counter returned by GET /client-config.
         # Every PUT that modifies this client must send it back so two
         # admins editing at once can't last-write-wins silently.
         current_version = config.get('version')
-        client_key = selected_client
+        current_settings = {
+            'city': config.get('city', ''),
+            'serve_weekends': bool(config.get('serve_weekends')),
+            'item_cooldown_days': config.get('item_cooldown_days', 20),
+            'source_pools': config.get('source_pools') or [],
+        }
+        client_key = f"{selected_client}::{selected_counter}"
     else:
         if not new_client_name.strip():
             st.markdown(
@@ -162,50 +281,48 @@ def render_customisation_editor(api: MenuApiClient):
                 unsafe_allow_html=True,
             )
             return
+        counters = []
+        counter_names = []
         current_active = [s for s in all_base_slots if s not in set(const_slots)]
         current_counts = {s: 1 for s in all_base_slots}
         current_theme = dict(default_theme_map)
         current_version = None  # no row yet; set after api.create_client
+        current_settings = {
+            'city': '',
+            'serve_weekends': False,
+            'item_cooldown_days': 20,
+            'source_pools': [],
+        }
         client_key = "_new_"
 
     # ============================================================
-    # Section 2: Customize Categories
+    # Section 2: Client settings (shared by every counter)
+    # ============================================================
+    new_settings = _render_client_settings(current_settings, client_key)
+    theme_days = (
+        all_day_names if new_settings['serve_weekends'] else weekday_names
+    )
+
+    # ============================================================
+    # Section 3: Customize Categories
     # ============================================================
     new_active_slots = render_slot_editor(
         all_base_slots, current_active, const_slots, client_key,
     )
 
-    # Show auto-mapped menu category
-    if new_active_slots:
-        sorted_selected = sorted(new_active_slots)
-        matched_cat = None
-        for cat_name, cat_slots in menu_categories.items():
-            if sorted(cat_slots) == sorted_selected:
-                matched_cat = cat_name
-                break
-        if matched_cat:
-            st.markdown(
-                f'<span class="status-pill match">Mapped to {matched_cat}</span>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                '<span class="status-pill new">New category will be created</span>',
-                unsafe_allow_html=True,
-            )
-
     # ============================================================
-    # Section 3: Item Frequency
+    # Section 4: Item Frequency
     # ============================================================
     new_slot_counts = render_multi_slot_editor(
         new_active_slots, current_counts, const_slots, client_key,
     )
 
     # ============================================================
-    # Section 4: Day-wise Theme Override
+    # Section 5: Day-wise Theme Override
     # ============================================================
     new_theme_map = render_theme_editor(
         current_theme, default_theme_map, available_themes, client_key,
+        days=theme_days,
     )
 
     # ============================================================
@@ -216,6 +333,8 @@ def render_customisation_editor(api: MenuApiClient):
     # Unsaved changes indicator
     if not is_create_mode:
         changes = []
+        if is_new_counter:
+            changes.append(f"new counter '{selected_counter}'")
         if set(new_active_slots) != set(current_active):
             changes.append("categories")
         count_changes = {k: v for k, v in new_slot_counts.items()
@@ -226,6 +345,8 @@ def render_customisation_editor(api: MenuApiClient):
                          if v != current_theme.get(k)}
         if theme_changes:
             changes.append("themes")
+        if new_settings != current_settings:
+            changes.append("settings")
         if changes:
             st.markdown(
                 f'<div class="changes-indicator">&#9679; Unsaved: {", ".join(changes)}</div>',
@@ -257,21 +378,18 @@ def render_customisation_editor(api: MenuApiClient):
                 st.error("Select at least one category.")
             else:
                 try:
-                    api.create_client(name, new_active_slots)
-                    freq_overrides = {k: v for k, v in new_slot_counts.items()
-                                      if k in new_active_slots and v != 1}
-                    theme_overrides = {k: v for k, v in new_theme_map.items()
-                                       if v != default_theme_map.get(k)}
-                    if freq_overrides or theme_overrides:
-                        # Fetch the just-created config to pick up its
-                        # starting version (server-side default is 1).
-                        fresh = api.get_client_config(name)
-                        payload = {'version': fresh.get('version', 1)}
-                        if freq_overrides:
-                            payload['slot_counts'] = new_slot_counts
-                        if theme_overrides:
-                            payload['theme_map'] = new_theme_map
-                        api.update_client_config(name, payload)
+                    # One round-trip: the create endpoint takes the
+                    # starting counter's shape and the client settings, so
+                    # there's no create-then-patch dance any more.
+                    api.create_client(
+                        name, new_active_slots,
+                        slot_counts={
+                            k: v for k, v in new_slot_counts.items()
+                            if k in new_active_slots
+                        },
+                        theme_map=new_theme_map,
+                        settings=new_settings,
+                    )
                     # Invalidate the planner sidebar's cached client list
                     # so the new client shows up immediately rather than
                     # 60s later when the TTL expires.
@@ -289,11 +407,11 @@ def render_customisation_editor(api: MenuApiClient):
             st.rerun()
 
     else:
-        col_save, col_reset, col_delete = st.columns(3)
+        col_save, col_reset, col_del_counter, col_delete = st.columns(4)
 
         with col_save:
             save_clicked = st.button(
-                "Save", type="primary",
+                "Save Counter" if is_new_counter else "Save", type="primary",
                 key="editor_save_all", use_container_width=True,
             )
 
@@ -301,6 +419,21 @@ def render_customisation_editor(api: MenuApiClient):
             reset_clicked = st.button(
                 "Reset to Defaults",
                 key="editor_reset_all", use_container_width=True,
+                disabled=is_new_counter,
+            )
+
+        with col_del_counter:
+            # Deleting the only counter would leave the client unplannable,
+            # so that path is closed off here as well as server-side.
+            delete_counter_clicked = st.button(
+                "Delete Counter",
+                key="editor_delete_counter_btn", use_container_width=True,
+                disabled=is_new_counter or len(counter_names) <= 1,
+                help=(
+                    "A client must keep at least one counter."
+                    if len(counter_names) <= 1 else
+                    f"Remove the '{selected_counter}' serving line."
+                ),
             )
 
         with col_delete:
@@ -320,34 +453,67 @@ def render_customisation_editor(api: MenuApiClient):
             except Exception as e:
                 st.error(f"Delete failed: {e}")
 
-        if save_clicked:
-            payload = {'version': current_version}
-            if set(new_active_slots) != set(current_active):
-                payload['active_base_slots'] = new_active_slots
-            count_overrides = {k: v for k, v in new_slot_counts.items()
-                               if k in new_active_slots}
-            payload['slot_counts'] = count_overrides
-            payload['theme_map'] = new_theme_map
+        if delete_counter_clicked:
             try:
-                api.update_client_config(selected_client, payload)
-                st.session_state['editor_success_msg'] = f"Configuration saved for {selected_client}"
+                api.update_client_config(selected_client, {
+                    'version': current_version,
+                    'delete_counter': selected_counter,
+                })
+                st.cache_data.clear()
+                st.session_state['editor_success_msg'] = (
+                    f"Counter '{selected_counter}' removed from "
+                    f"{selected_client}."
+                )
                 st.rerun()
             except Exception as e:
-                # 409 surfaces here as an HTTPError with "modified by
-                # another request" in the message — tell the user to
-                # refresh rather than hide the conflict.
-                st.error(f"Save failed: {e}")
+                st.error(f"Delete counter failed: {e}")
+
+        if save_clicked:
+            if not new_active_slots:
+                st.error("Select at least one category.")
+            else:
+                payload = {
+                    'version': current_version,
+                    'counter': selected_counter,
+                    'active_base_slots': new_active_slots,
+                    'slot_counts': {
+                        k: v for k, v in new_slot_counts.items()
+                        if k in new_active_slots
+                    },
+                    'theme_map': new_theme_map,
+                    **new_settings,
+                }
+                if is_new_counter:
+                    payload['create_counter'] = True
+                try:
+                    api.update_client_config(selected_client, payload)
+                    # Counter list / weekend flag may have moved, and the
+                    # planner sidebar caches both.
+                    st.cache_data.clear()
+                    st.session_state['editor_success_msg'] = (
+                        f"Configuration saved for {selected_client} "
+                        f"({selected_counter})"
+                    )
+                    st.rerun()
+                except Exception as e:
+                    # 409 surfaces here as an HTTPError with "modified by
+                    # another request" in the message — tell the user to
+                    # refresh rather than hide the conflict.
+                    st.error(f"Save failed: {e}")
 
         if reset_clicked:
             payload = {
                 'version': current_version,
+                'counter': selected_counter,
                 'active_base_slots': list(all_base_slots),
                 'slot_counts': {s: 1 for s in all_base_slots},
                 'theme_map': dict(default_theme_map),
             }
             try:
                 api.update_client_config(selected_client, payload)
-                st.session_state['editor_success_msg'] = f"Reset {selected_client} to defaults"
+                st.session_state['editor_success_msg'] = (
+                    f"Reset {selected_client} ({selected_counter}) to defaults"
+                )
                 st.rerun()
             except Exception as e:
                 st.error(f"Reset failed: {e}")

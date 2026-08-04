@@ -4,11 +4,16 @@ Constraint-based weekly menu planner for corporate meal providers. Generates
 Indian menus that respect cuisine themes, item cooldowns, color variety,
 per-client customizations, and history.
 
+Each client has one or more **counters** — separate serving lines, each
+with its own categories, per-slot counts, and day themes — plus
+client-level settings for city, weekend service, item-cooldown window,
+and which item source pools it may draw from. The planner works one
+counter at a time; a day's saved menu holds every counter's picks.
+
 - **Frontend:** Streamlit
 - **Backend:** Flask API (auto-started by Streamlit on port 5000)
 - **Solver:** Google OR-Tools CP-SAT
-- **Database:** Supabase (PostgreSQL) — clients, users, history, config
-- **Auth:** bcrypt passwords + signed bearer tokens between Streamlit and Flask
+- **Database:** Supabase (PostgreSQL) — clients, history, config
 
 ---
 
@@ -21,8 +26,10 @@ docker compose up --build
 
 Open `http://localhost:8501`, log in, pick a client, generate a plan.
 
-> First-time setup: run the three schema files (`scripts/*.sql`) once in
-> the Supabase SQL editor, and seed an admin via the Python script — see
+> First-time setup: run `scripts/create_tables.sql` then
+> `scripts/create_history_tables.sql` once in the Supabase SQL editor.
+> Upgrading a database that predates the counters schema? Follow those
+> two with `scripts/migrate_to_counters.sql` — see
 > [docs/setup.md](docs/setup.md).
 
 ## Quick start (local Python)
@@ -32,7 +39,7 @@ cd ikigai_masala-main
 pip install -r requirements-dev.txt
 
 # one-time in the Supabase SQL editor:
-#   scripts/create_tables.sql, create_history_tables.sql, create_users_table.sql
+#   scripts/create_tables.sql, create_history_tables.sql
 
 cat > .streamlit/secrets.toml <<EOF
 SUPABASE_URL   = "https://<your-project>.supabase.co"
@@ -40,11 +47,12 @@ SUPABASE_KEY   = "<service_role key>"
 API_SECRET_KEY = "$(python -c 'import secrets; print(secrets.token_hex(32))')"
 EOF
 
-ADMIN_EMAIL="you@company.com" ADMIN_PASSWORD="<≥8 chars>" \
-  python scripts/seed_admin.py
-
 streamlit run app.py
 ```
+
+> `scripts/seed_admin.py` / `create_users_table.sql` are only needed if
+> the authentication layer is wired back into `api/app.py` — the current
+> build has no login path.
 
 ---
 

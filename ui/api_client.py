@@ -117,12 +117,24 @@ class MenuApiClient:
         data = _parse_response(resp, "Failed to list clients")
         return data["clients"]
 
+    def list_counters(self, client_name: str) -> List[str]:
+        """Return the client's serving-line (counter) names, in stored order."""
+        def _do():
+            return self.session.get(
+                f"{self.base_url}/api/v1/client-counters/{client_name}",
+                timeout=10,
+            )
+        resp = _with_one_retry(_do, retryable=True)
+        data = _parse_response(resp, "Failed to list counters")
+        return data.get("counters", [])
+
     def plan(
         self,
         client_name: str,
         start_date: str,
         num_days: int = 5,
         time_limit_seconds: int = 240,
+        counter: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload = {
             "client_name": client_name,
@@ -130,6 +142,8 @@ class MenuApiClient:
             "num_days": num_days,
             "time_limit_seconds": time_limit_seconds,
         }
+        if counter:
+            payload["counter"] = counter
 
         def _do():
             return self.session.post(
@@ -149,6 +163,7 @@ class MenuApiClient:
         start_date: Optional[str] = None,
         num_days: int = 5,
         time_limit_seconds: int = 240,
+        counter: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload = {
             "client_name": client_name,
@@ -159,6 +174,8 @@ class MenuApiClient:
         }
         if start_date:
             payload["start_date"] = start_date
+        if counter:
+            payload["counter"] = counter
 
         def _do():
             return self.session.post(
@@ -173,16 +190,19 @@ class MenuApiClient:
         client_name: str,
         week_plan: Dict[str, Dict[str, str]],
         week_start: str,
+        counter: Optional[str] = None,
     ) -> Dict[str, Any]:
-        # /save overwrites on (client, dates) — re-saving the same week
-        # is idempotent (DELETE + INSERT under the hood). We still keep
-        # this single-shot: a 502/504 retry after a partial write would
-        # be a brief flicker but the second call lands on a clean slate.
+        # /save overwrites on (client, counter, dates) — re-saving the
+        # same week is idempotent. We still keep this single-shot: a
+        # 502/504 retry after a partial write would be a brief flicker
+        # but the second call lands on a clean slate.
         payload = {
             "client_name": client_name,
             "week_plan": week_plan,
             "week_start": week_start,
         }
+        if counter:
+            payload["counter"] = counter
         resp = self.session.post(
             f"{self.base_url}/api/v1/save", json=payload, timeout=30,
         )
@@ -190,6 +210,7 @@ class MenuApiClient:
 
     def diagnose(
         self, client_name: str, start_date: str, num_days: int = 5,
+        counter: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run pre-flight diagnostics for *(client, start_date, num_days)*.
 
@@ -205,6 +226,8 @@ class MenuApiClient:
             "start_date": start_date,
             "num_days": num_days,
         }
+        if counter:
+            payload["counter"] = counter
 
         def _do():
             return self.session.post(
@@ -216,6 +239,7 @@ class MenuApiClient:
 
     def get_saved_plan(
         self, client_name: str, start_date: str, num_days: int = 5,
+        counter: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Return the saved plan for *(client, start_date, num_days)*.
 
@@ -229,6 +253,8 @@ class MenuApiClient:
             "start_date": start_date,
             "num_days": num_days,
         }
+        if counter:
+            params["counter"] = counter
 
         def _do():
             return self.session.get(
@@ -248,10 +274,15 @@ class MenuApiClient:
         resp = _with_one_retry(_do, retryable=True)
         return _parse_response(resp, "Failed to load metadata")
 
-    def get_client_config(self, client_name: str) -> Dict[str, Any]:
+    def get_client_config(
+        self, client_name: str, counter: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        params = {"counter": counter} if counter else None
+
         def _do():
             return self.session.get(
-                f"{self.base_url}/api/v1/client-config/{client_name}", timeout=10,
+                f"{self.base_url}/api/v1/client-config/{client_name}",
+                params=params, timeout=10,
             )
         resp = _with_one_retry(_do, retryable=True)
         return _parse_response(resp, "Failed to load config")
@@ -268,14 +299,30 @@ class MenuApiClient:
         resp = _with_one_retry(_do, retryable=True)
         return _parse_response(resp, "Save failed")
 
-    def create_client(self, name: str, active_slots: list) -> Dict[str, Any]:
+    def create_client(
+        self,
+        name: str,
+        active_slots: list,
+        counter: Optional[str] = None,
+        slot_counts: Optional[Dict[str, int]] = None,
+        theme_map: Optional[Dict[str, str]] = None,
+        settings: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         # Creating the same name twice is caught server-side (409 / "already
         # exists"), so a retry after a proxy 502 is self-correcting.
+        payload: Dict[str, Any] = {"name": name, "active_slots": active_slots}
+        if counter:
+            payload["counter"] = counter
+        if slot_counts:
+            payload["slot_counts"] = slot_counts
+        if theme_map:
+            payload["theme_map"] = theme_map
+        if settings:
+            payload.update(settings)
+
         def _do():
             return self.session.post(
-                f"{self.base_url}/api/v1/client",
-                json={"name": name, "active_slots": active_slots},
-                timeout=10,
+                f"{self.base_url}/api/v1/client", json=payload, timeout=10,
             )
         resp = _with_one_retry(_do, retryable=True)
         return _parse_response(resp, "Create failed")

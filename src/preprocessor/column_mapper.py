@@ -48,6 +48,14 @@ REQUIRED_COL_ALIASES: Dict[str, List[str]] = {
     'item_color': ['item_color', 'colour', 'color', 'color_group', 'dominant_color'],
     'key_ingredient': ['key_ingredient', 'keyingredient', 'ingredient_key'],
     'sub_category': ['sub_category', 'subcategory'],
+    # Which item collection a row belongs to. Referenced by
+    # ``clients.source_pools`` to scope the ontology per client. Left out
+    # of the ontology entirely means "everything is shared" — see
+    # pool_builder.scope_to_source_pools. Deliberately does NOT alias
+    # ``vendor``: a vendor column names who cooks the dish, not which
+    # client menu book it belongs to, and treating the two as the same
+    # would filter every pool down to nothing.
+    'source_pool': ['source_pool', 'source_pools', 'item_pool', 'menu_pool', 'pool'],
 }
 
 # --- Optional flag column aliases ---
@@ -67,6 +75,9 @@ OPTIONAL_FLAG_ALIASES: Dict[str, List[str]] = {
     'is_deep_fried_starter': ['is_deep_fried_starter'],
     'is_nonveg_dry': ['is_nonveg_dry', 'is_non_veg_dry', 'nonveg_dry', 'non_veg_dry'],
     'is_nonveg_gravy': ['is_nonveg_gravy', 'is_non_veg_gravy', 'nonveg_gravy', 'non_veg_gravy'],
+    # Carve-outs for the dedicated ``curd`` and ``curd_rice`` slots.
+    'is_plain_curd': ['is_plain_curd', 'is_curd'],
+    'is_curd_rice': ['is_curd_rice', 'is_curdrice'],
 }
 
 # Deep-fried starter detection keywords
@@ -134,6 +145,9 @@ class ColumnMapper:
             df['key_ingredient'] = ''
         if 'sub_category' not in df.columns:
             df['sub_category'] = ''
+        # Note: ``source_pool`` is intentionally NOT defaulted in. Its
+        # absence is the signal that the whole ontology is shared, which
+        # scope_to_source_pools relies on.
 
         # Generate item_id from item name if not present
         if 'item_id' not in df.columns:
@@ -147,6 +161,7 @@ class ColumnMapper:
             ('item_color', _norm_color),
             ('key_ingredient', _norm_str),
             ('sub_category', _norm_str),
+            ('source_pool', _norm_str),
         ):
             if col in df.columns:
                 df[col] = df[col].map(fn)

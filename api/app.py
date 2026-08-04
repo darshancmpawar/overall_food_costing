@@ -47,7 +47,12 @@ configure_logging()
 validate_required_env()
 from src.preprocessor import ExcelReader, DataCleanser
 from src.preprocessor.pool_builder import PoolBuilder, _base_slot
-from src.constants import BASE_SLOT_NAMES, CONST_SLOTS, REPEATABLE_ITEM_BASES
+from src.constants import (
+    ALL_DAY_NAMES, BASE_SLOT_NAMES, CONST_SLOTS, DEFAULT_COUNTER_NAME,
+    DEFAULT_ITEM_COOLDOWN_DAYS, REPEATABLE_ITEM_BASES, WEEKDAY_NAMES,
+)
+# UnknownCounterError is a ValueError subclass, so the existing 400/404
+# handlers pick it up without a dedicated except branch.
 from src.client import ClientConfigLoader
 from src.client.client_config import DEFAULT_THEME_MAP, AVAILABLE_THEMES  # noqa: F401 — surfaced in editor-metadata response
 from src.history import HistoryManager
@@ -183,17 +188,29 @@ def _get_client_loader():
     return _client_loader
 
 
-def _get_menu_data():
+def _get_menu_data(source_pools=None):
+    """Return ``(df, pools)`` for the ontology, scoped to *source_pools*.
+
+    The cleansed DataFrame is process-wide (it's the whole ontology), but
+    pools are built per distinct ``clients.source_pools`` set because
+    scoping happens before slot mapping. Clients that declare no source
+    pools — the common case — all share the ``()`` entry, so this stays a
+    single build for most deployments.
+    """
     global _pools, _df
-    if _pools is None:
+    key = tuple(sorted({str(p).strip().lower() for p in (source_pools or []) if str(p).strip()}))
+    if _pools is None or key not in _pools:
         with _init_lock:
-            if _pools is None:
+            if _df is None:
                 reader = ExcelReader(DEFAULT_EXCEL_PATH)
                 raw_df = reader.read()
                 cleanser = DataCleanser(raw_df)
                 _df = cleanser.clean()
-                _pools = PoolBuilder.build_pools(_df)
-    return _df, _pools
+            if _pools is None:
+                _pools = {}
+            if key not in _pools:
+                _pools[key] = PoolBuilder.build_pools(_df, source_pools=key)
+    return _df, _pools[key]
 
 
 def _get_menu_rules():
@@ -217,11 +234,24 @@ def _get_cost_lookup():
     return _cost_lookup
 
 
-def _rules_and_skip_for_client(client_name, dates):
-    """Return (rules, skip_cells) for a client, merging generic + per-client."""
+def _rules_and_skip_for_client(client_name, dates, item_cooldown_days=None):
+    """Return (rules, skip_cells) for a client, merging generic + per-client.
+
+    *item_cooldown_days* comes from ``clients.item_cooldown_days`` and
+    overrides whatever the generic rule config declares, so the number an
+    admin set on the client is the number the diagnostics report and the
+    history window is sized from. Passing ``None`` leaves the configured
+    value alone.
+    """
     generic = _get_menu_rules()
     loader = MenuRuleLoader()
     rules = loader.load_for_client(client_name, generic)
+    if item_cooldown_days is not None:
+        for rule in rules:
+            if getattr(rule, 'rule_type', None) is not None and hasattr(
+                rule, 'cooldown_days',
+            ) and rule.rule_type.value == 'item_cooldown':
+                rule.cooldown_days = int(item_cooldown_days)
     skip_cells = set()
     for rule in rules:
         if hasattr(rule, 'compute_skip_cells'):
@@ -270,6 +300,7 @@ def _effective_history_window(rules) -> int:
 
 def _build_history_context(
     df, client_name, start_date, weekday_dates, window_days=None,
+    counter_name=None, cooldown_days=DEFAULT_ITEM_COOLDOWN_DAYS,
 ):
     """Shared helper to build history-based solver inputs from Supabase.
 
@@ -283,8 +314,11 @@ def _build_history_context(
     don't silently truncate the window. Falling back to the floor
     keeps the function usable in tests / scripts that don't assemble
     rules upfront.
+
+    *counter_name* scopes history to one serving line (see
+    ``HistoryManager.filter_by_counter``); *cooldown_days* is the client's
+    ``item_cooldown_days``.
     """
-    import pandas as pd
     from src.db import get_supabase
 
     if window_days is None:
@@ -296,7 +330,7 @@ def _build_history_context(
     sb = get_supabase()
     long_resp = (
         sb.table('menu_history')
-        .select('*')
+        .select('client_name, service_date, menu')
         .eq('client_name', client_name)
         .gte('service_date', earliest_iso)
         .execute()
@@ -308,16 +342,20 @@ def _build_history_context(
         .gte('week_start', earliest_iso)
         .execute()
     )
-    long_df = pd.DataFrame(long_resp.data) if long_resp.data else None
-    weeks_df = pd.DataFrame(weeks_resp.data) if weeks_resp.data else None
-    hm.load_from_dataframes(long_df, weeks_df)
+    hm.load_from_menu_rows(long_resp.data or [], weeks_resp.data or [])
     # Rows are already scoped to this client at the DB layer, but leave
     # the in-memory filter in place as belt-and-suspenders for anyone
     # who seeds the manager from an unfiltered DataFrame.
     hm = hm.filter_by_client(client_name)
+    if counter_name:
+        hm = hm.filter_by_counter(counter_name)
 
-    banned = hm.banned_items_by_date(weekday_dates, const_slots=CONST_SLOTS,
-                                      repeatable_items=REPEATABLE_ITEM_BASES)
+    banned = hm.banned_items_by_date(
+        weekday_dates,
+        cooldown_days=int(cooldown_days),
+        const_slots=CONST_SLOTS,
+        repeatable_items=REPEATABLE_ITEM_BASES,
+    )
     ricebread_items = set(
         df.loc[df.get('is_rice_bread', 0) == 1, 'item'].tolist()
     ) if 'is_rice_bread' in df.columns else set()
@@ -331,10 +369,10 @@ def _cached_on_g(key: str, compute):
 
     ClientConfigLoader properties read Supabase on every access (no
     in-process cache, so admin edits are picked up immediately). Some of
-    them — client_names, menu_categories — end up fetched multiple
-    times per request: once from _require_known_client, once from the
-    endpoint body, once from editor-metadata etc. Caching on ``g`` keeps
-    the "live reads across requests" guarantee while collapsing the
+    them — client_names, and a client's counters — end up fetched multiple
+    times per request: once from _require_known_client, once for the
+    solver config, once for the response's theme labels. Caching on ``g``
+    keeps the "live reads across requests" guarantee while collapsing the
     intra-request round trips.
 
     Outside a request context (module-import paths, bare scripts) there
@@ -358,10 +396,16 @@ def _request_client_names():
     )
 
 
-def _request_menu_categories():
+def _request_client_config(client_name, counter_name=None):
+    """Load one client+counter config, memoized for this request.
+
+    ``/plan`` reads the config for the solver, the diagnostics context,
+    and the response's theme labels; without this the same client row is
+    fetched three times per request.
+    """
     return _cached_on_g(
-        'menu_categories',
-        lambda: _get_client_loader().menu_categories,
+        f'client_config::{client_name}::{counter_name or ""}',
+        lambda: _get_client_loader().get_client(client_name, counter_name),
     )
 
 
@@ -392,12 +436,18 @@ def _require_known_client(client_name):
         raise ValueError(f"Unknown client: {client_name}")
 
 
-def _weekdays_from(start_date, num_days):
-    """Return up to num_days weekday dates (skip Sat/Sun) starting from start_date."""
+def _weekdays_from(start_date, num_days, serve_weekends=False):
+    """Return up to num_days service dates starting from start_date.
+
+    Sat/Sun are skipped unless the client has ``serve_weekends = true``,
+    in which case every consecutive day counts — a 7-day request for a
+    weekend-serving site covers a full calendar week rather than stretching
+    across nine days to find five weekdays.
+    """
     dates = []
     d = start_date
     while len(dates) < num_days:
-        if d.weekday() < 5:  # Mon-Fri
+        if serve_weekends or d.weekday() < 5:  # Mon-Fri unless weekends served
             dates.append(d)
         d += dt.timedelta(days=1)
     return dates
@@ -453,6 +503,20 @@ class SolverInputs:
     rb_ban: Dict[Any, Any]
     recent_sigs: List[Any]
     cfg: SolverConfig
+    counter_name: str = ''
+
+
+def _requested_counter(data: Dict[str, Any]) -> Optional[str]:
+    """Return the ``counter`` the caller asked for, or None for the default.
+
+    Accepts ``counter`` or ``counter_name`` so the query-string and JSON
+    surfaces can use whichever reads better.
+    """
+    for key in ('counter', 'counter_name'):
+        value = data.get(key)
+        if value:
+            return str(value).strip()
+    return None
 
 
 def _prepare_solver_inputs(data: Dict[str, Any]) -> SolverInputs:
@@ -470,14 +534,21 @@ def _prepare_solver_inputs(data: Dict[str, Any]) -> SolverInputs:
         min(MAX_TIME_LIMIT_SECONDS, int(data.get('time_limit_seconds', 240))),
     )
 
-    client_cfg = _get_client_loader().get_client(client_name)
-    df, pools = _get_menu_data()
+    client_cfg = _request_client_config(client_name, _requested_counter(data))
+    df, pools = _get_menu_data(client_cfg.source_pools)
     start_date = dt.date.fromisoformat(start_date_str) if start_date_str else today_in_app_tz()
-    weekday_dates = _weekdays_from(start_date, num_days)
-    rules, skip_cells = _rules_and_skip_for_client(client_name, weekday_dates)
+    weekday_dates = _weekdays_from(
+        start_date, num_days, serve_weekends=client_cfg.serve_weekends,
+    )
+    rules, skip_cells = _rules_and_skip_for_client(
+        client_name, weekday_dates,
+        item_cooldown_days=client_cfg.item_cooldown_days,
+    )
     window_days = _effective_history_window(rules)
     banned, rb_ban, recent_sigs = _build_history_context(
         df, client_name, start_date, weekday_dates, window_days=window_days,
+        counter_name=client_cfg.counter_name,
+        cooldown_days=client_cfg.item_cooldown_days,
     )
     cfg = _build_solver_config(df, client_cfg, start_date, num_days, time_limit, weekday_dates)
 
@@ -496,6 +567,7 @@ def _prepare_solver_inputs(data: Dict[str, Any]) -> SolverInputs:
         rb_ban=rb_ban,
         recent_sigs=recent_sigs,
         cfg=cfg,
+        counter_name=client_cfg.counter_name,
     )
 
 
@@ -634,8 +706,13 @@ def plan_menu():
         solution = enrich_solution_with_costs(formatter.to_dict(), _get_cost_lookup())
         response = {
             'success': True,
-            'message': f'Menu plan generated for {inputs.client_name}',
+            'message': (
+                f'Menu plan generated for {inputs.client_name} '
+                f'({inputs.counter_name})'
+            ),
             'solution': solution,
+            'counter': inputs.counter_name,
+            'counters': inputs.client_cfg.counter_names,
             'rule_diagnostics': diag_dicts,
             'summary': summary,
         }
@@ -715,8 +792,12 @@ def regenerate_cells():
         solution = enrich_solution_with_costs(formatter.to_dict(), _get_cost_lookup())
         response = {
             'success': True,
-            'message': f'Regenerated {sum(len(v) for v in replace_mask.values())} cells for {inputs.client_name}',
+            'message': (
+                f'Regenerated {sum(len(v) for v in replace_mask.values())} '
+                f'cells for {inputs.client_name} ({inputs.counter_name})'
+            ),
             'solution': solution,
+            'counter': inputs.counter_name,
         }
         if regen.rule_failures:
             response['rule_warnings'] = regen.rule_failures
@@ -753,6 +834,13 @@ def save_plan():
         if not week_start_str:
             return jsonify({'success': False, 'error': 'week_start is required'}), 400
 
+        # Resolve the counter through the loader so an unknown name is a
+        # 400 rather than history written under a counter that doesn't
+        # exist (which would then never load back).
+        client_cfg = _request_client_config(
+            client_name, _requested_counter(data),
+        )
+
         # Convert string date keys to date objects, extracting items from solution format
         week_plan = {
             dt.date.fromisoformat(d_str): _items_from_day(day_data)
@@ -771,14 +859,22 @@ def save_plan():
         # Get Supabase client for persistent storage
         from src.db import get_supabase
         sb = get_supabase()
-        # HistoryManager.save is now overwrite-on-conflict: re-saving for
-        # the same (client, dates) replaces the prior rows instead of
-        # appending. See HistoryManager.save docstring.
+        # HistoryManager.save is overwrite-on-conflict: re-saving for the
+        # same (client, counter, dates) replaces the prior menu instead of
+        # appending, and other counters' picks for those days are merged
+        # through untouched. See HistoryManager.save docstring.
         hm.save(week_plan, dates, client_name, week_start, sig,
                 supabase_client=sb,
-                strip_color_fn=strip_color_suffix)
+                strip_color_fn=strip_color_suffix,
+                counter_name=client_cfg.counter_name)
 
-        return jsonify({'success': True, 'message': 'Plan saved to history'})
+        return jsonify({
+            'success': True,
+            'message': (
+                f'Plan saved to history for {client_cfg.counter_name}'
+            ),
+            'counter': client_cfg.counter_name,
+        })
 
     except (ValueError, KeyError) as e:
         return jsonify({'success': False, 'error': str(e)}), 400
@@ -862,10 +958,13 @@ def saved_plan():
 
     Query params:
         client_name (required): the client to look up.
+        counter     (optional): which serving line; defaults to the
+            client's first counter, mirroring /plan.
         start_date  (optional): YYYY-MM-DD; defaults to today in
             APP_TZ.
-        num_days    (optional): number of weekdays from start_date;
-            defaults to 5. Sat/Sun are skipped, mirroring /plan.
+        num_days    (optional): number of service days from start_date;
+            defaults to 5. Sat/Sun are skipped unless the client serves
+            weekends, mirroring /plan.
 
     Response shape mirrors /plan so the UI can use one code path:
         {
@@ -897,19 +996,23 @@ def saved_plan():
             dt.date.fromisoformat(start_date_str)
             if start_date_str else today_in_app_tz()
         )
-        weekday_dates = _weekdays_from(start_date, num_days)
 
-        loader = _get_client_loader()
-        client_cfg = loader.get_client(client_name)
+        client_cfg = _request_client_config(
+            client_name, _requested_counter(request.args),
+        )
+        weekday_dates = _weekdays_from(
+            start_date, num_days, serve_weekends=client_cfg.serve_weekends,
+        )
 
         from src.db import get_supabase
         sb = get_supabase()
         raw_saved = HistoryManager.load_saved_plan(
             sb, client_name, weekday_dates,
+            counter_name=client_cfg.counter_name,
         )
 
         # Enrich with color suffix so the UI's renderer matches /plan.
-        df, _pools = _get_menu_data()
+        df, _pools = _get_menu_data(client_cfg.source_pools)
         enriched = _enrich_history_plan(raw_saved, df)
 
         formatter = SolutionFormatter(
@@ -927,6 +1030,8 @@ def saved_plan():
             'covered_dates': covered,
             'source': 'history',
             'solution': solution,
+            'counter': client_cfg.counter_name,
+            'counters': client_cfg.counter_names,
         })
     except ValueError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
@@ -945,34 +1050,70 @@ def editor_metadata():
             'const_slots': list(CONST_SLOTS),
             'default_theme_map': DEFAULT_THEME_MAP,
             'available_themes': AVAILABLE_THEMES,
+            'weekday_names': list(WEEKDAY_NAMES),
+            'all_day_names': list(ALL_DAY_NAMES),
             'clients': _request_client_names(),
-            'menu_categories': _request_menu_categories(),
         })
     except Exception as e:
         logger.error("Failed to load editor metadata: %s", e, exc_info=True)
         return _internal_error_response(500)
 
 
+def _counter_payload(counter) -> Dict[str, Any]:
+    """Project a CounterConfig into the editor's JSON shape."""
+    return {
+        'name': counter.name,
+        'active_base_slots': [
+            s for s in counter.categories if s not in CONST_SLOTS
+        ],
+        'const_slots': [s for s in counter.categories if s in CONST_SLOTS],
+        # Slots the counter doesn't serve are stored as 0; only surface
+        # the ones actually on the line so the editor's number inputs
+        # match the categories it renders.
+        'slot_counts': {
+            slot: count for slot, count in counter.slot_counts.items()
+            if count > 0
+        },
+        'theme_map': counter.theme_map,
+    }
+
+
 @app.route('/api/v1/client-config/<client_name>', methods=['GET'])
 def get_client_config(client_name):
     """Return the full editable config for one client.
+
+    Covers every counter plus the client-level settings (city, weekend
+    service, item cooldown, source pools). The top-level
+    ``active_base_slots`` / ``slot_counts`` / ``theme_map`` keys describe
+    the counter named by ``?counter=`` (default: the first), so callers
+    that only care about single-counter clients can ignore the
+    ``counters`` array.
 
     Includes a ``version`` field + an ``ETag: "<version>"`` response
     header so callers can issue optimistic-concurrency-safe PUTs.
     """
     try:
         loader = _get_client_loader()
-        base_slots = loader.get_active_slots_for_client(client_name)
-        menu_category = loader.get_client_menu_category(client_name)
-        cfg = loader.get_client(client_name)
+        cfg = loader.get_client(client_name, _requested_counter(request.args))
         version = loader.get_client_version(client_name)
+        selected = next(
+            (c for c in cfg.counters if c.name == cfg.counter_name), None,
+        )
         response = jsonify({
             'success': True,
             'name': cfg.name,
-            'menu_category': menu_category,
-            'active_base_slots': [s for s in base_slots if s not in CONST_SLOTS],
-            'slot_counts': cfg.slot_counts,
+            'counter': cfg.counter_name,
+            'counters': [_counter_payload(c) for c in cfg.counters],
+            'active_base_slots': (
+                _counter_payload(selected)['active_base_slots']
+                if selected else []
+            ),
+            'slot_counts': _counter_payload(selected)['slot_counts'] if selected else {},
             'theme_map': cfg.theme_map,
+            'city': cfg.city,
+            'serve_weekends': cfg.serve_weekends,
+            'item_cooldown_days': cfg.item_cooldown_days,
+            'source_pools': cfg.source_pools,
             'version': version,
         })
         response.headers['ETag'] = f'"{version}"'
@@ -982,6 +1123,57 @@ def get_client_config(client_name):
     except Exception as e:
         logger.error("Failed to load client config: %s", e, exc_info=True)
         return _internal_error_response(500)
+
+
+@app.route('/api/v1/client-counters/<client_name>', methods=['GET'])
+def get_client_counters(client_name):
+    """Return just the counter names for a client.
+
+    The planner sidebar needs the counter list on every Streamlit rerun to
+    render its picker; this keeps that off the heavier /client-config
+    payload.
+    """
+    try:
+        counters = _get_client_loader().get_counters(client_name)
+        return jsonify({
+            'success': True,
+            'client_name': client_name,
+            'counters': [c.name for c in counters],
+        })
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 404
+    except Exception as e:
+        logger.error("Failed to load counters: %s", e, exc_info=True)
+        return _internal_error_response(500)
+
+
+def _parse_client_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract and validate the client-level settings from a request body.
+
+    Returns only the keys the caller actually sent, so a PUT that just
+    edits a counter doesn't reset the client's city to empty.
+    """
+    out: Dict[str, Any] = {}
+    if 'city' in data:
+        out['city'] = str(data['city'] or '').strip()
+    if 'serve_weekends' in data:
+        out['serve_weekends'] = bool(data['serve_weekends'])
+    if 'item_cooldown_days' in data:
+        try:
+            cooldown = int(data['item_cooldown_days'])
+        except (TypeError, ValueError):
+            raise ValueError('item_cooldown_days must be an integer') from None
+        if cooldown < 0:
+            raise ValueError('item_cooldown_days must be >= 0')
+        out['item_cooldown_days'] = cooldown
+    if 'source_pools' in data:
+        pools = data['source_pools']
+        if isinstance(pools, str):
+            pools = [p.strip() for p in pools.split(',')]
+        if not isinstance(pools, (list, tuple)):
+            raise ValueError('source_pools must be a list of pool names')
+        out['source_pools'] = [str(p).strip() for p in pools if str(p).strip()]
+    return out
 
 
 _ETAG_RE = re.compile(r'^\s*(?:W/)?"?(\d+)"?\s*$')
@@ -1010,7 +1202,19 @@ def _expected_version(data: Dict[str, Any]) -> Optional[int]:
 
 @app.route('/api/v1/client-config/<client_name>', methods=['PUT'])
 def update_client_config(client_name):
-    """Update a client's configuration (slots, slot counts, theme overrides).
+    """Update a client's configuration.
+
+    Body keys, all optional:
+
+    * ``counter`` — which serving line the slot/theme keys below apply to
+      (default: the client's first counter). ``new_counter_name`` renames
+      it; ``create_counter: true`` allows creating a line that doesn't
+      exist yet.
+    * ``active_base_slots``, ``slot_counts``, ``theme_map`` — the
+      selected counter's menu shape.
+    * ``delete_counter`` — remove the named counter instead of editing it.
+    * ``city``, ``serve_weekends``, ``item_cooldown_days``,
+      ``source_pools`` — client-level settings.
 
     Requires an optimistic-concurrency version from the caller to avoid
     last-write-wins when two admins edit the same client. Either:
@@ -1037,18 +1241,39 @@ def update_client_config(client_name):
                 ),
             }), 400
 
+        # Settings are read before the version bump so an invalid payload
+        # (e.g. a negative cooldown) is rejected without burning a version.
+        settings = _parse_client_settings(data)
+
         # Bump first: the conditional update is the actual race gate.
         # If another writer snuck in between the caller's GET and this
         # PUT, the update matches zero rows and we 409 before doing any
         # partial sub-update.
         new_version = loader.bump_version_if_matches(client_name, expected)
 
-        if 'active_base_slots' in data:
-            loader.update_client_slots(client_name, data['active_base_slots'])
-        if 'slot_counts' in data:
-            loader.update_client_slot_counts(client_name, data['slot_counts'])
-        if 'theme_map' in data:
-            loader.update_client_theme_overrides(client_name, data['theme_map'])
+        if settings:
+            loader.update_client_settings(client_name, **settings)
+
+        if data.get('delete_counter'):
+            loader.delete_counter(client_name, str(data['delete_counter']))
+        else:
+            counter_keys = ('active_base_slots', 'slot_counts', 'theme_map')
+            if any(k in data for k in counter_keys) or data.get('new_counter_name'):
+                counter = _requested_counter(data)
+                if counter and data.get('create_counter'):
+                    target = counter
+                else:
+                    # Resolve through the loader so a typo'd counter name
+                    # raises UnknownCounterError (400) rather than silently
+                    # appending a new line.
+                    target = loader.get_client(client_name, counter).counter_name
+                loader.upsert_counter(
+                    client_name, target,
+                    categories=data.get('active_base_slots'),
+                    slot_counts=data.get('slot_counts'),
+                    theme_map=data.get('theme_map'),
+                    new_name=data.get('new_counter_name'),
+                )
 
         response = jsonify({
             'success': True,
@@ -1072,7 +1297,14 @@ def update_client_config(client_name):
 
 @app.route('/api/v1/client', methods=['POST'])
 def create_client():
-    """Create a new client."""
+    """Create a new client with a single starting counter.
+
+    Body: ``name`` (required), ``active_slots``, ``counter``/``counter_name``,
+    ``slot_counts``, ``theme_map``, plus the client-level settings
+    (``city``, ``serve_weekends``, ``item_cooldown_days``,
+    ``source_pools``). Extra counters are added afterwards via
+    PUT /client-config with ``create_counter: true``.
+    """
     try:
         data = request.get_json(silent=True) or {}
         name = data.get('name', '').strip()
@@ -1080,8 +1312,25 @@ def create_client():
         if not name:
             return jsonify({'success': False, 'error': 'name is required'}), 400
 
+        settings = _parse_client_settings(data)
         loader = _get_client_loader()
-        loader.create_client(name, active_slots)
+        if name in _request_client_names():
+            return jsonify({
+                'success': False,
+                'error': f"Client '{name}' already exists.",
+            }), 409
+        loader.create_client(
+            name, active_slots,
+            counter_name=_requested_counter(data) or DEFAULT_COUNTER_NAME,
+            slot_counts=data.get('slot_counts'),
+            theme_map=data.get('theme_map'),
+            city=settings.get('city', ''),
+            serve_weekends=settings.get('serve_weekends', False),
+            item_cooldown_days=settings.get(
+                'item_cooldown_days', DEFAULT_ITEM_COOLDOWN_DAYS,
+            ),
+            source_pools=settings.get('source_pools'),
+        )
 
         return jsonify({'success': True, 'message': f'Client {name} created'})
     except ValueError as e:
@@ -1159,57 +1408,66 @@ _drift_logged = False
 def _probe_supabase():
     """Cheap reachability + schema-drift check.
 
-    A single ``select('name, version').limit(1)`` query against the
-    ``clients`` table verifies, in one round-trip:
+    Two ``limit(1)`` queries verify, in two round-trips:
 
       1. Supabase is reachable / authenticated / not blocked by RLS.
-      2. The Phase 2 #14 migration has been applied (the ``version``
-         column exists on ``clients``).
+      2. The counters-schema columns exist on ``clients`` (``counters``,
+         ``city``, ``serve_weekends``, ``item_cooldown_days``,
+         ``source_pools``, ``version``).
+      3. ``menu_history`` has the jsonb ``menu`` column rather than the
+         old ``slot`` / ``item_base`` long form.
 
     Returns ``(reachable: bool, schema_info: dict)``. The dict carries
     ``status`` ∈ {"ok", "drift_detected", "unknown"} and a list of
     ``missing`` ``"table.column"`` strings. Operators read it from the
     /health response body — uptime monitors only see the HTTP status,
-    which stays 200 when drift is present (the app still serves via
-    the runtime fallback in client_config.py).
+    which stays 200 when drift is present (the client-config code still
+    serves via its runtime fallback).
     """
     global _drift_logged
-    try:
-        from src.db import get_supabase
-        get_supabase().table('clients').select('name, version').limit(
-            1,
-        ).execute()
-        if _drift_logged:
-            logger.info(
-                "Schema drift cleared: clients.version is now visible. "
-                "Optimistic-concurrency on PUT /client-config is back in "
-                "effect."
-            )
-            _drift_logged = False
-        return True, {"status": "ok", "missing": []}
-    except Exception as exc:  # noqa: BLE001 — both error classes converted to dict states
-        # Distinguish "DB has no clients.version column" (caller needs
-        # to apply the migration) from "Supabase is just unreachable"
-        # (network / auth issue).
-        from src.client.client_config import _is_undefined_column
-        if _is_undefined_column(exc):
-            if not _drift_logged:
-                logger.error(
-                    "Schema drift: clients.version column missing. "
-                    "Re-run scripts/create_tables.sql in the Supabase "
-                    "SQL editor (the ALTER TABLE ... ADD COLUMN IF NOT "
-                    "EXISTS is idempotent). The editor + concurrency "
-                    "code degrade gracefully until the column is "
-                    "added, but optimistic-concurrency on PUT is "
-                    "disabled in this state."
-                )
-                _drift_logged = True
-            return True, {
-                "status": "drift_detected",
-                "missing": ["clients.version"],
-            }
-        logger.warning("Supabase health probe failed: %s", exc)
+    from src.client.client_config import _CLIENT_COLUMNS, _is_undefined_column
+
+    missing = []
+    reachable = True
+    for table, columns, label in (
+        ('clients', _CLIENT_COLUMNS, 'clients.counters'),
+        ('menu_history', 'client_name, service_date, menu', 'menu_history.menu'),
+    ):
+        try:
+            from src.db import get_supabase
+            get_supabase().table(table).select(columns).limit(1).execute()
+        except Exception as exc:  # noqa: BLE001 — converted to dict states below
+            # Distinguish "this deployment hasn't run the migration"
+            # (caller needs to apply SQL) from "Supabase is just
+            # unreachable" (network / auth issue).
+            if _is_undefined_column(exc):
+                missing.append(label)
+                continue
+            logger.warning("Supabase health probe failed on %s: %s", table, exc)
+            reachable = False
+            break
+
+    if not reachable:
         return False, {"status": "unknown", "missing": []}
+    if missing:
+        if not _drift_logged:
+            logger.error(
+                "Schema drift: %s missing. Run scripts/create_tables.sql, "
+                "scripts/create_history_tables.sql, and (for deployments "
+                "that predate the counters schema) "
+                "scripts/migrate_to_counters.sql in the Supabase SQL "
+                "editor — all three are idempotent. Planning will fail or "
+                "silently lose history until the migration is applied.",
+                ", ".join(missing),
+            )
+            _drift_logged = True
+        return True, {"status": "drift_detected", "missing": missing}
+    if _drift_logged:
+        logger.info(
+            "Schema drift cleared: the counters schema is now visible."
+        )
+        _drift_logged = False
+    return True, {"status": "ok", "missing": []}
 
 
 @app.route('/api/v1/metrics', methods=['GET'])

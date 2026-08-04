@@ -7,6 +7,8 @@ or an ``If-Match`` header, and mismatched versions return 409 with the
 current version in the body so the client can refresh + retry.
 """
 
+import copy
+
 import pytest
 
 flask = pytest.importorskip("flask", reason="Flask not installed")
@@ -147,8 +149,17 @@ class TestPutRejectsStaleVersion:
             headers=auth_headers,
         )
 
-        # Capture what's in the theme_overrides table after writer A won.
-        after_winner = list(fake_supabase.rows('theme_overrides'))
+        # Capture the stored counters after writer A won. Theme maps live
+        # in clients.counters now, so that's what must stay untouched.
+        def _counters():
+            row = next(
+                r for r in fake_supabase.rows('clients')
+                if r['name'] == 'Rippling'
+            )
+            return copy.deepcopy(row['counters'])
+
+        after_winner = _counters()
+        assert after_winner[0]['theme_map']['monday'] == 'chinese'
 
         # Writer B tries with a stale version + a very different theme_map.
         resp = client.put(
@@ -161,7 +172,6 @@ class TestPutRejectsStaleVersion:
         )
         assert resp.status_code == 409
 
-        after_loser = list(fake_supabase.rows('theme_overrides'))
-        assert after_loser == after_winner, (
-            "a rejected PUT must not modify theme_overrides"
+        assert _counters() == after_winner, (
+            "a rejected PUT must not modify clients.counters"
         )

@@ -41,6 +41,9 @@ THEME_TAG_COLORS = {
     'biryani': ('#2E2009', '#F4A53C'),  # saffron rice
     'south':   ('#292509', '#EAD27A'),  # turmeric / coconut
     'north':   ('#2E1410', '#EF8A6A'),  # tandoori paprika
+    # Extended theme name clients may store; canonicalised to 'chinese'
+    # before it reaches the solver, but the editor renders the raw value.
+    'chinese_continental': ('#0F2622', '#7FCFC0'),
 }
 
 THEME_ICONS = {
@@ -49,6 +52,7 @@ THEME_ICONS = {
     'biryani': '&#9733;',   # star
     'south':   '&#9650;',   # triangle up
     'north':   '&#9632;',   # square
+    'chinese_continental': '&#9672;',
 }
 
 
