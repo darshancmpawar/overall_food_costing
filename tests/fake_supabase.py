@@ -30,6 +30,7 @@ class _Query:
         self._single = False
         self._mode = "select"
         self._payload: Any = None
+        self._conflict: List[str] = []
 
     # -- filters -----------------------------------------------------------
 
@@ -70,6 +71,16 @@ class _Query:
     def insert(self, payload):
         self._mode = "insert"
         self._payload = payload
+        return self
+
+    def upsert(self, payload, on_conflict: Optional[str] = None, **_kwargs):
+        self._mode = "upsert"
+        self._payload = payload
+        # Column list the real client matches on; defaults to "id" like
+        # PostgREST does when no ON CONFLICT target is given.
+        self._conflict = [
+            c.strip() for c in (on_conflict or "id").split(",") if c.strip()
+        ]
         return self
 
     def update(self, payload: Dict[str, Any]):
@@ -120,6 +131,24 @@ class _Query:
             self._rows.extend(copy.deepcopy(r) for r in new_rows)
             return _Response([copy.deepcopy(r) for r in new_rows])
 
+        if self._mode == "upsert":
+            payload = self._payload
+            new_rows = payload if isinstance(payload, list) else [payload]
+            for new in new_rows:
+                key = tuple(new.get(c) for c in self._conflict)
+                existing = next(
+                    (
+                        r for r in self._rows
+                        if tuple(r.get(c) for c in self._conflict) == key
+                    ),
+                    None,
+                )
+                if existing is None:
+                    self._rows.append(copy.deepcopy(new))
+                else:
+                    existing.update(copy.deepcopy(new))
+            return _Response([copy.deepcopy(r) for r in new_rows])
+
         if self._mode == "update":
             updated = []
             for row in self._rows:
@@ -148,6 +177,9 @@ class _Table:
 
     def insert(self, payload):
         return self._new_query().insert(payload)
+
+    def upsert(self, payload, on_conflict: Optional[str] = None, **kwargs):
+        return self._new_query().upsert(payload, on_conflict=on_conflict, **kwargs)
 
     def update(self, payload):
         return self._new_query().update(payload)

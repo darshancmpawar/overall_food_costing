@@ -4,13 +4,33 @@ Client configuration loader — Supabase backend.
 Every read queries Supabase directly so any change made via the UI,
 API, or dashboard is immediately reflected on the next call.
 
-Schema:
-    menu_categories (name TEXT PK, slots TEXT[])
-    clients         (name TEXT PK, menu_category TEXT FK → menu_categories.name,
-                     version INT NOT NULL DEFAULT 1)
-    slot_count_overrides (client_name, slot, count)
-    theme_overrides      (client_name, day, theme)
-    app_settings         (key, value)
+Schema (counters revision)::
+
+    clients (
+        name               TEXT PRIMARY KEY,
+        counters           JSONB NOT NULL DEFAULT '[]',
+        city               TEXT,
+        serve_weekends     BOOLEAN NOT NULL DEFAULT false,
+        item_cooldown_days INT,
+        source_pools       JSONB NOT NULL DEFAULT '[]',
+        version            INT NOT NULL DEFAULT 1,
+        created_at         TIMESTAMPTZ DEFAULT now()
+    )
+    app_settings (key TEXT PK, value JSONB)
+
+A *counter* is one serving line. Each entry of ``clients.counters`` is::
+
+    {
+      "name": "South Indian",
+      "categories":  ["bread", "rice", …],   # slots this line serves
+      "slot_counts": {"veg_dry": 2, …},      # how many of each per day
+      "theme_map":   {"monday": "south", …}  # cuisine theme per weekday
+    }
+
+This replaces the previous ``menu_categories`` / ``slot_count_overrides``
+/ ``theme_overrides`` tables: a client's slot set, per-slot counts, and
+theme map are now per-counter and stored inline, so one client can serve
+several different menus on the same day.
 """
 
 from __future__ import annotations
@@ -18,11 +38,18 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from src.constants import (
+    ALL_DAY_NAMES,
+    AVAILABLE_THEMES,
     BASE_SLOT_NAMES as BASE_SLOTS,
     CONST_SLOTS,
+    DEFAULT_COUNTER_NAME,
+    DEFAULT_ITEM_COOLDOWN_DAYS,
+    DEFAULT_THEME_MAP,
+    WEEKDAY_NAMES,
+    canonical_theme,
 )
 from src.db import get_supabase
 from src.preprocessor.pool_builder import _expand_slots_in_order
@@ -32,15 +59,21 @@ logger = logging.getLogger(__name__)
 
 # Postgres error code for "undefined_column"; raised by the Supabase REST
 # layer when a SELECT / UPDATE references a column that doesn't exist —
-# e.g. when a deployment hasn't applied the Phase 2 #14 migration that
-# added clients.version. Detecting it lets us degrade gracefully (the
-# editor keeps working) while logging a loud, actionable hint so the
-# operator knows to run scripts/create_tables.sql.
+# e.g. when a deployment is still on the pre-counters schema. Detecting it
+# lets us degrade gracefully (the editor keeps working) while logging a
+# loud, actionable hint so the operator knows to run the migration.
 _PG_UNDEFINED_COLUMN = "42703"
 _MIGRATION_HINT = (
-    "Re-run scripts/create_tables.sql in the Supabase SQL editor to apply "
-    "the latest migrations. Optimistic-concurrency on PUT /client-config "
-    "is degraded until the column exists."
+    "Run scripts/create_tables.sql (and scripts/migrate_to_counters.sql "
+    "if this deployment predates the counters schema) in the Supabase SQL "
+    "editor to apply the latest migrations."
+)
+
+# Columns the loader selects from ``clients``. Kept in one place so the
+# graceful-degradation path below knows exactly what it may lose.
+_CLIENT_COLUMNS = (
+    'name, counters, city, serve_weekends, item_cooldown_days, '
+    'source_pools, version'
 )
 
 
@@ -57,15 +90,19 @@ def _is_undefined_column(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return "does not exist" in msg and "column" in msg
 
-DEFAULT_THEME_MAP: Dict[str, str] = {
-    'monday': 'mix',
-    'tuesday': 'chinese',
-    'wednesday': 'biryani',
-    'thursday': 'south',
-    'friday': 'north',
-}
 
-AVAILABLE_THEMES: List[str] = ['mix', 'chinese', 'biryani', 'south', 'north']
+__all__ = [
+    # DEFAULT_THEME_MAP / AVAILABLE_THEMES live in src.constants but are
+    # re-exported here: api.app surfaces both in /editor-metadata and has
+    # imported them from this module since before the counters schema.
+    'AVAILABLE_THEMES',
+    'ClientConfig',
+    'ClientConfigLoader',
+    'ConcurrentEditError',
+    'CounterConfig',
+    'DEFAULT_THEME_MAP',
+    'UnknownCounterError',
+]
 
 
 class ConcurrentEditError(ValueError):
@@ -81,12 +118,70 @@ class ConcurrentEditError(ValueError):
         self.current_version = current_version
 
 
+class UnknownCounterError(ValueError):
+    """Raised when a caller names a counter the client doesn't have.
+
+    ``available`` lists the counter names that do exist so the error
+    message (and a 400 response built from it) can point somewhere
+    useful.
+    """
+
+    def __init__(self, message: str, *, available: Optional[List[str]] = None):
+        super().__init__(message)
+        self.available = list(available or [])
+
+
+@dataclass
+class CounterConfig:
+    """One serving line's menu shape.
+
+    ``categories`` is the raw slot list as stored (may include constant
+    slots like ``papad``); ``active_slots`` is that list expanded by
+    ``slot_counts`` into the numbered slot ids the solver works with
+    (``veg_dry`` x2 → ``veg_dry__1``, ``veg_dry__2``).
+    """
+
+    name: str
+    categories: List[str] = field(default_factory=list)
+    slot_counts: Dict[str, int] = field(default_factory=dict)
+    theme_map: Dict[str, str] = field(default_factory=dict)
+    active_slots: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the JSON shape stored in ``clients.counters``."""
+        return {
+            'name': self.name,
+            'categories': list(self.categories),
+            'slot_counts': dict(self.slot_counts),
+            'theme_map': dict(self.theme_map),
+        }
+
+
 @dataclass
 class ClientConfig:
+    """A client plus the one counter the current request is planning for.
+
+    The solver, rules, and formatters only ever plan one serving line at
+    a time, so ``active_slots`` / ``slot_counts`` / ``theme_map`` project
+    the *selected* counter and keep the downstream contract unchanged.
+    ``counters`` carries every line so callers can iterate (the UI's
+    counter picker, the editor).
+    """
+
     name: str
     active_slots: List[str] = field(default_factory=list)
     slot_counts: Dict[str, int] = field(default_factory=dict)
     theme_map: Dict[str, str] = field(default_factory=dict)
+    counter_name: str = DEFAULT_COUNTER_NAME
+    counters: List[CounterConfig] = field(default_factory=list)
+    city: str = ''
+    serve_weekends: bool = False
+    item_cooldown_days: int = DEFAULT_ITEM_COOLDOWN_DAYS
+    source_pools: List[str] = field(default_factory=list)
+
+    @property
+    def counter_names(self) -> List[str]:
+        return [c.name for c in self.counters]
 
 
 def _dedupe_preserve_order(values: List[str]) -> List[str]:
@@ -99,9 +194,56 @@ def _dedupe_preserve_order(values: List[str]) -> List[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Loader
-# ---------------------------------------------------------------------------
+def _as_json(value, default):
+    """Coerce a Supabase JSONB cell into Python.
+
+    supabase-py normally hands back decoded JSON, but a column typed
+    ``text`` (or a driver version that doesn't decode) yields a string.
+    Accept both so a schema that stores counters as text still loads.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return default
+    return value
+
+
+def _normalise_theme_map(raw, *, serve_weekends: bool = False) -> Dict[str, str]:
+    """Return a full day → solver-theme map from a stored theme map.
+
+    Missing days fall back to :data:`DEFAULT_THEME_MAP`, extended theme
+    names are canonicalised (``chinese_continental`` → ``chinese``), and
+    unknown days are dropped. Weekend keys are only included when the
+    client actually serves weekends, so a Mon–Fri client can't pick up a
+    Saturday theme by accident.
+    """
+    days = list(ALL_DAY_NAMES) if serve_weekends else list(WEEKDAY_NAMES)
+    stored = {}
+    if isinstance(raw, dict):
+        for day, theme in raw.items():
+            key = str(day).strip().lower()
+            if key in days:
+                stored[key] = canonical_theme(str(theme))
+    return {
+        day: stored.get(day, canonical_theme(DEFAULT_THEME_MAP[day]))
+        for day in days
+    }
+
+
+def _normalise_categories(raw) -> List[str]:
+    """Return the stored slot list, keeping order and dropping unknowns."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    known = set(BASE_SLOTS) | set(CONST_SLOTS)
+    out = [
+        str(s).strip().lower() for s in raw
+        if str(s).strip().lower() in known
+    ]
+    return _dedupe_preserve_order(out)
+
 
 class ClientConfigLoader:
     """
@@ -128,12 +270,158 @@ class ClientConfigLoader:
         if row.data is None:
             return None
         val = row.data['value']
+        # A jsonb cell normally decodes to a list/dict/scalar. Some
+        # exports round-trip a JSON string as bare text ("menu_cat_3"
+        # rather than "\"menu_cat_3\""), so fall back to the raw value
+        # instead of dropping the setting.
         if isinstance(val, str):
-            try:
-                return json.loads(val)
-            except (json.JSONDecodeError, ValueError):
-                return val
+            return _as_json(val, val)
         return val
+
+    def _client_row(self, name: str) -> Dict[str, Any]:
+        """Return the raw ``clients`` row for *name*.
+
+        Falls back to a name-only select when the counters columns are
+        missing (deployment still on the old schema) so the caller gets a
+        clear "run the migration" log instead of a 500 from PostgREST.
+        """
+        try:
+            row = (
+                self._sb.table('clients')
+                .select(_CLIENT_COLUMNS)
+                .eq('name', name)
+                .maybe_single()
+                .execute()
+            )
+        except Exception as exc:
+            if _is_undefined_column(exc):
+                logger.error(
+                    "clients table is missing one or more counters-schema "
+                    "columns (%s) — falling back to defaults for %r. %s",
+                    _CLIENT_COLUMNS, name, _MIGRATION_HINT,
+                )
+                self._require_client_exists(name)
+                return {'name': name}
+            raise
+        if not row.data:
+            raise ValueError(f"Unknown client: {name}")
+        return row.data
+
+    def _counters_from_row(self, row: Dict[str, Any]) -> List[CounterConfig]:
+        """Parse ``clients.counters`` into :class:`CounterConfig` objects.
+
+        A client with no counters (freshly inserted by hand, or a row that
+        predates the migration) yields an empty list — callers surface
+        that as a configuration error rather than silently planning an
+        empty menu.
+        """
+        serve_weekends = bool(row.get('serve_weekends'))
+        raw_counters = _as_json(row.get('counters'), []) or []
+        if isinstance(raw_counters, dict):
+            # Tolerate a single counter stored as an object rather than a
+            # one-element array.
+            raw_counters = [raw_counters]
+        if not raw_counters:
+            return []
+        # Read the min-one list once per row rather than once per counter —
+        # it's a Supabase round-trip and identical for every counter.
+        core_min_one = self.core_min_one_slots
+        out: List[CounterConfig] = []
+        for idx, entry in enumerate(raw_counters, start=1):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get('name') or f'Counter {idx}').strip()
+            categories = _normalise_categories(entry.get('categories'))
+            slot_counts = self._normalise_slot_counts(
+                entry.get('slot_counts'), categories, core_min_one,
+            )
+            theme_map = _normalise_theme_map(
+                entry.get('theme_map'), serve_weekends=serve_weekends,
+            )
+            out.append(CounterConfig(
+                name=name,
+                categories=categories,
+                slot_counts=slot_counts,
+                theme_map=theme_map,
+                active_slots=self._expand(categories, slot_counts),
+            ))
+        return out
+
+    def _normalise_slot_counts(
+        self,
+        raw,
+        categories: List[str],
+        core_min_one: Optional[List[str]] = None,
+    ) -> Dict[str, int]:
+        """Return per-slot counts for every base slot.
+
+        Slots the counter doesn't serve get 0 so ``_expand`` drops them;
+        slots it does serve default to 1. ``core_min_one_slots`` is
+        applied only to slots the counter actually serves — forcing a
+        minimum on a slot the client never offers would invent a serving
+        line out of thin air.
+
+        Pass *core_min_one* when normalising several counters in a row to
+        avoid re-reading it from ``app_settings`` each time.
+        """
+        stored = raw if isinstance(raw, dict) else {}
+        must_have = (
+            core_min_one if core_min_one is not None
+            else self.core_min_one_slots
+        )
+        active = set(categories)
+        counts: Dict[str, int] = {}
+        for slot in BASE_SLOTS:
+            if slot not in active:
+                counts[slot] = 0
+                continue
+            try:
+                counts[slot] = max(0, int(stored.get(slot, 1)))
+            except (TypeError, ValueError):
+                counts[slot] = 1
+        for must in must_have:
+            if must in active:
+                counts[must] = max(1, int(counts.get(must, 1)))
+        return counts
+
+    @staticmethod
+    def _expand(categories: List[str], slot_counts: Dict[str, int]) -> List[str]:
+        """Expand base slots into numbered slot ids, constants passed through."""
+        expanded: List[str] = []
+        for slot in categories:
+            if slot in CONST_SLOTS:
+                expanded.append(slot)
+            else:
+                expanded.extend(
+                    _expand_slots_in_order(
+                        [slot], {slot: slot_counts.get(slot, 1)},
+                    )
+                )
+        return _dedupe_preserve_order(expanded)
+
+    @staticmethod
+    def _pick_counter(
+        counters: List[CounterConfig],
+        counter_name: Optional[str],
+        client_name: str,
+    ) -> CounterConfig:
+        """Return the requested counter, or the first one by default."""
+        if not counters:
+            raise ValueError(
+                f"Client {client_name!r} has no counters configured. Add at "
+                f"least one counter (slots + themes) in the customisation "
+                f"editor, or delete the client."
+            )
+        if not counter_name:
+            return counters[0]
+        wanted = str(counter_name).strip().lower()
+        for counter in counters:
+            if counter.name.strip().lower() == wanted:
+                return counter
+        raise UnknownCounterError(
+            f"Unknown counter {counter_name!r} for client {client_name!r}.",
+            available=[c.name for c in counters],
+        )
 
     # ---- read properties ---------------------------------------------------
 
@@ -148,16 +436,6 @@ class ClientConfigLoader:
         return [r['name'] for r in rows.data]
 
     @property
-    def menu_categories(self) -> Dict[str, List[str]]:
-        """Return {category_name: [slot, ...]} from menu_categories table."""
-        rows = (
-            self._sb.table('menu_categories')
-            .select('name, slots')
-            .execute()
-        )
-        return {r['name']: r['slots'] for r in rows.data}
-
-    @property
     def core_min_one_slots(self) -> List[str]:
         val = self._setting('core_min_one_slots')
         return val if val else []
@@ -169,176 +447,264 @@ class ClientConfigLoader:
 
     # ---- client read methods -----------------------------------------------
 
-    def get_client(self, name: str) -> ClientConfig:
-        """Return a fully-populated ClientConfig for the given client."""
-        row = (
-            self._sb.table('clients')
-            .select('name, menu_category')
-            .eq('name', name)
-            .maybe_single()
-            .execute()
-        )
-        if not row.data:
-            raise ValueError(f"Unknown client: {name}")
+    def get_client(
+        self, name: str, counter_name: Optional[str] = None,
+    ) -> ClientConfig:
+        """Return a fully-populated ClientConfig for one of the client's counters.
 
-        entry = row.data
-        base_slots = self.get_slots_for_menu_category(entry.get('menu_category', ''))
-        slot_counts = self.get_slot_counts_for_client(name)
-
-        # Expand base slots using slot counts (e.g. veg_dry x2 → veg_dry__1, veg_dry__2)
-        expanded: List[str] = []
-        for slot in base_slots:
-            if slot in CONST_SLOTS:
-                expanded.append(slot)
-            else:
-                expanded.extend(
-                    _expand_slots_in_order([slot], {slot: slot_counts.get(slot, 1)})
-                )
-        expanded = _dedupe_preserve_order(expanded)
-
-        theme_map = self.get_theme_map_for_client(name)
-
+        *counter_name* selects the serving line to plan; omitted means the
+        client's first counter, which is what single-counter clients (the
+        large majority) always want.
+        """
+        row = self._client_row(name)
+        counters = self._counters_from_row(row)
+        selected = self._pick_counter(counters, counter_name, name)
         return ClientConfig(
             name=name,
-            active_slots=expanded,
-            slot_counts=slot_counts,
-            theme_map=theme_map,
+            active_slots=list(selected.active_slots),
+            slot_counts=dict(selected.slot_counts),
+            theme_map=dict(selected.theme_map),
+            counter_name=selected.name,
+            counters=counters,
+            city=str(row.get('city') or ''),
+            serve_weekends=bool(row.get('serve_weekends')),
+            item_cooldown_days=self._coerce_cooldown(
+                row.get('item_cooldown_days'),
+            ),
+            source_pools=[
+                str(p) for p in (_as_json(row.get('source_pools'), []) or [])
+            ],
         )
 
-    def get_client_menu_category(self, name: str) -> str:
-        """Return the menu_category name for a client."""
-        row = (
-            self._sb.table('clients')
-            .select('menu_category')
-            .eq('name', name)
-            .maybe_single()
-            .execute()
-        )
-        if not row.data:
-            raise ValueError(f"Unknown client: {name}")
-        return row.data.get('menu_category', '')
+    @staticmethod
+    def _coerce_cooldown(value) -> int:
+        """Return a usable cooldown from a possibly-NULL column."""
+        try:
+            coerced = int(value)
+        except (TypeError, ValueError):
+            return DEFAULT_ITEM_COOLDOWN_DAYS
+        return coerced if coerced >= 0 else DEFAULT_ITEM_COOLDOWN_DAYS
 
-    def get_active_slots_for_client(self, name: str) -> List[str]:
-        """Return the base active slots for a client (via its menu_category)."""
-        cat_name = self.get_client_menu_category(name)
-        return self.get_slots_for_menu_category(cat_name)
+    def get_counters(self, name: str) -> List[CounterConfig]:
+        """Return every counter configured for a client, in stored order."""
+        return self._counters_from_row(self._client_row(name))
 
-    def get_slots_for_menu_category(self, cat_name: str) -> List[str]:
-        """Return slots for a menu_category. Raises ValueError when missing/empty."""
-        if not cat_name:
-            raise ValueError(
-                "Client has no menu category assigned. "
-                "Please assign a menu category with slots to this client, "
-                "or delete the client."
-            )
-        row = (
-            self._sb.table('menu_categories')
-            .select('slots')
-            .eq('name', cat_name)
-            .maybe_single()
-            .execute()
-        )
-        if not row.data or not row.data.get('slots'):
-            raise ValueError(
-                f"Menu category '{cat_name}' has no slots configured. "
-                f"Please configure slots for this category in the "
-                f"customisation editor, or delete the client."
-            )
-        return row.data['slots']
+    def get_counter_names(self, name: str) -> List[str]:
+        return [c.name for c in self.get_counters(name)]
 
-    def get_slot_counts_for_client(self, name: str) -> Dict[str, int]:
-        counts = {s: 1 for s in BASE_SLOTS}
-        rows = (
-            self._sb.table('slot_count_overrides')
-            .select('slot, count')
-            .eq('client_name', name)
-            .execute()
-        )
-        for r in rows.data:
-            if r['slot'] in counts:
-                counts[r['slot']] = max(0, int(r['count']))
-        for must in self.core_min_one_slots:
-            counts[must] = max(1, int(counts.get(must, 1)))
-        return counts
+    def get_client_settings(self, name: str) -> Dict[str, Any]:
+        """Return the client-level (not per-counter) settings."""
+        row = self._client_row(name)
+        return {
+            'city': str(row.get('city') or ''),
+            'serve_weekends': bool(row.get('serve_weekends')),
+            'item_cooldown_days': self._coerce_cooldown(
+                row.get('item_cooldown_days'),
+            ),
+            'source_pools': [
+                str(p) for p in (_as_json(row.get('source_pools'), []) or [])
+            ],
+        }
 
-    def get_theme_map_for_client(self, name: str) -> Dict[str, str]:
-        """Return merged theme map (global defaults + per-client overrides)."""
-        merged = dict(DEFAULT_THEME_MAP)
-        rows = (
-            self._sb.table('theme_overrides')
-            .select('day, theme')
-            .eq('client_name', name)
-            .execute()
+    def get_active_slots_for_client(
+        self, name: str, counter_name: Optional[str] = None,
+    ) -> List[str]:
+        """Return the base (unexpanded) slots for one of a client's counters."""
+        counters = self.get_counters(name)
+        return list(self._pick_counter(counters, counter_name, name).categories)
+
+    def get_slot_counts_for_client(
+        self, name: str, counter_name: Optional[str] = None,
+    ) -> Dict[str, int]:
+        counters = self.get_counters(name)
+        return dict(
+            self._pick_counter(counters, counter_name, name).slot_counts,
         )
-        for r in rows.data:
-            day_lower = r['day'].lower()
-            if day_lower in merged and r['theme'] in AVAILABLE_THEMES:
-                merged[day_lower] = r['theme']
-        return merged
+
+    def get_theme_map_for_client(
+        self, name: str, counter_name: Optional[str] = None,
+    ) -> Dict[str, str]:
+        counters = self.get_counters(name)
+        return dict(self._pick_counter(counters, counter_name, name).theme_map)
 
     # ---- mutation methods --------------------------------------------------
 
-    def find_or_create_menu_category(self, slots: List[str]) -> str:
-        """Find an existing menu_category whose slots match exactly, or create a new one.
+    def _write_counters(
+        self, name: str, counters: List[CounterConfig],
+    ) -> None:
+        self._sb.table('clients').update({
+            'counters': [c.to_dict() for c in counters],
+        }).eq('name', name).execute()
 
-        Returns the category name.
-        """
-        sorted_slots = sorted(slots)
-        categories = self.menu_categories
-        for cat_name, cat_slots in categories.items():
-            if sorted(cat_slots) == sorted_slots:
-                return cat_name
-
-        # No match — create a new category
-        # Name: menu_cat_N where N is next available number
-        existing_nums = []
-        for cat_name in categories:
-            if cat_name.startswith('menu_cat_'):
-                try:
-                    existing_nums.append(int(cat_name.split('_')[-1]))
-                except ValueError:
-                    pass
-        next_num = max(existing_nums, default=0) + 1
-        new_name = f'menu_cat_{next_num}'
-
-        self._sb.table('menu_categories').insert({
-            'name': new_name,
-            'slots': list(slots),
-        }).execute()
-        return new_name
-
-    def create_client(self, name: str, active_slots: List[str]) -> None:
-        """Create a new client. Auto-assigns or creates a menu_category."""
-        cat_name = self.find_or_create_menu_category(active_slots)
+    def create_client(
+        self,
+        name: str,
+        active_slots: List[str],
+        *,
+        counter_name: str = DEFAULT_COUNTER_NAME,
+        slot_counts: Optional[Dict[str, int]] = None,
+        theme_map: Optional[Dict[str, str]] = None,
+        city: str = '',
+        serve_weekends: bool = False,
+        item_cooldown_days: int = DEFAULT_ITEM_COOLDOWN_DAYS,
+        source_pools: Optional[List[str]] = None,
+    ) -> None:
+        """Create a client with a single starting counter."""
+        categories = _normalise_categories(active_slots)
+        if not categories:
+            raise ValueError(
+                "A client needs at least one valid category (slot). "
+                f"Got: {active_slots!r}"
+            )
+        counter = CounterConfig(
+            name=str(counter_name).strip() or DEFAULT_COUNTER_NAME,
+            categories=categories,
+            slot_counts=self._normalise_slot_counts(slot_counts, categories),
+            theme_map=_normalise_theme_map(
+                theme_map, serve_weekends=serve_weekends,
+            ),
+        )
         self._sb.table('clients').insert({
             'name': name,
-            'menu_category': cat_name,
+            'counters': [counter.to_dict()],
+            'city': city or None,
+            'serve_weekends': bool(serve_weekends),
+            'item_cooldown_days': int(item_cooldown_days),
+            'source_pools': list(source_pools or []),
         }).execute()
 
     def delete_client(self, name: str) -> None:
-        row = (
-            self._sb.table('clients')
-            .select('name')
-            .eq('name', name)
-            .maybe_single()
-            .execute()
-        )
-        if not row.data:
-            raise ValueError(f"Unknown client: {name}")
-        # CASCADE on FK deletes slot_count_overrides & theme_overrides
+        self._require_client_exists(name)
+        # menu_history / week_signatures cascade on the FK.
         self._sb.table('clients').delete().eq('name', name).execute()
+
+    def update_client_settings(
+        self,
+        name: str,
+        *,
+        city: Optional[str] = None,
+        serve_weekends: Optional[bool] = None,
+        item_cooldown_days: Optional[int] = None,
+        source_pools: Optional[List[str]] = None,
+    ) -> None:
+        """Update client-level settings. Omitted fields are left alone."""
+        payload: Dict[str, Any] = {}
+        if city is not None:
+            payload['city'] = city or None
+        if serve_weekends is not None:
+            payload['serve_weekends'] = bool(serve_weekends)
+        if item_cooldown_days is not None:
+            cooldown = int(item_cooldown_days)
+            if cooldown < 0:
+                raise ValueError("item_cooldown_days must be >= 0")
+            payload['item_cooldown_days'] = cooldown
+        if source_pools is not None:
+            payload['source_pools'] = [
+                str(p).strip() for p in source_pools if str(p).strip()
+            ]
+        if not payload:
+            return
+        self._sb.table('clients').update(payload).eq('name', name).execute()
+
+    def upsert_counter(
+        self,
+        name: str,
+        counter_name: str,
+        *,
+        categories: Optional[List[str]] = None,
+        slot_counts: Optional[Dict[str, int]] = None,
+        theme_map: Optional[Dict[str, str]] = None,
+        new_name: Optional[str] = None,
+    ) -> None:
+        """Create or update one counter on a client.
+
+        Only the fields passed are touched, so the editor can save the
+        theme map without having to resend the slot list. A counter name
+        that doesn't exist yet is appended.
+        """
+        row = self._client_row(name)
+        serve_weekends = bool(row.get('serve_weekends'))
+        counters = self._counters_from_row(row)
+        wanted = str(counter_name).strip()
+        idx = next(
+            (
+                i for i, c in enumerate(counters)
+                if c.name.strip().lower() == wanted.lower()
+            ),
+            None,
+        )
+        if idx is None:
+            base_categories = _normalise_categories(categories or [])
+            if not base_categories:
+                raise ValueError(
+                    f"New counter {wanted!r} needs at least one category."
+                )
+            counters.append(CounterConfig(
+                name=wanted,
+                categories=base_categories,
+                slot_counts=self._normalise_slot_counts(
+                    slot_counts, base_categories,
+                ),
+                theme_map=_normalise_theme_map(
+                    theme_map, serve_weekends=serve_weekends,
+                ),
+            ))
+        else:
+            current = counters[idx]
+            new_categories = (
+                _normalise_categories(categories)
+                if categories is not None else current.categories
+            )
+            if not new_categories:
+                raise ValueError(
+                    f"Counter {wanted!r} needs at least one category."
+                )
+            # Recompute counts whenever the slot set moves, so a slot that
+            # was just removed can't leave a stale count behind.
+            new_counts = self._normalise_slot_counts(
+                slot_counts if slot_counts is not None else current.slot_counts,
+                new_categories,
+            )
+            new_themes = (
+                _normalise_theme_map(theme_map, serve_weekends=serve_weekends)
+                if theme_map is not None else current.theme_map
+            )
+            counters[idx] = CounterConfig(
+                name=str(new_name).strip() if new_name else current.name,
+                categories=new_categories,
+                slot_counts=new_counts,
+                theme_map=new_themes,
+            )
+        self._write_counters(name, counters)
+
+    def delete_counter(self, name: str, counter_name: str) -> None:
+        """Remove a counter. The last remaining counter can't be deleted."""
+        counters = self.get_counters(name)
+        wanted = str(counter_name).strip().lower()
+        remaining = [
+            c for c in counters if c.name.strip().lower() != wanted
+        ]
+        if len(remaining) == len(counters):
+            raise UnknownCounterError(
+                f"Unknown counter {counter_name!r} for client {name!r}.",
+                available=[c.name for c in counters],
+            )
+        if not remaining:
+            raise ValueError(
+                "A client must keep at least one counter. Delete the client "
+                "instead if it is no longer served."
+            )
+        self._write_counters(name, remaining)
 
     # ---- optimistic concurrency -------------------------------------------
 
     def get_client_version(self, name: str) -> int:
         """Return the current version counter for a client.
 
-        Fresh rows and rows created post-migration default to 1; every
-        successful PUT through the API bumps this by one. If the
-        ``version`` column doesn't exist (deployment hasn't applied the
-        Phase 2 #14 migration), log a clear ERROR and return 1 — the
-        editor stays usable, optimistic-concurrency just no-ops until
-        the migration runs.
+        Fresh rows default to 1; every successful PUT through the API
+        bumps this by one. If the ``version`` column doesn't exist, log a
+        clear ERROR and return 1 — the editor stays usable,
+        optimistic-concurrency just no-ops until the migration runs.
         """
         try:
             row = (
@@ -391,9 +757,8 @@ class ClientConfigLoader:
 
         If the ``version`` column doesn't exist (pre-migration
         deployment), the conditional filter blows up — we log an ERROR
-        and fall back to a non-conditional UPDATE so writes still go
-        through (without the optimistic-concurrency check). The hint in
-        the log tells operators what to do.
+        and skip the check so writes still go through. The hint in the
+        log tells operators what to do.
 
         Raises:
             ConcurrentEditError: when the update matches no rows. The
@@ -417,9 +782,9 @@ class ClientConfigLoader:
                     name, _MIGRATION_HINT,
                 )
                 self._require_client_exists(name)
-                # No concurrency guard available; just touch the row to
-                # confirm it exists and return 1 so the response surface
-                # stays consistent.
+                # No concurrency guard available; just confirm the row
+                # exists and return 1 so the response surface stays
+                # consistent.
                 return 1
             raise
         if not result.data:
@@ -434,70 +799,92 @@ class ClientConfigLoader:
             )
         return new_version
 
-    def update_client_slots(self, name: str, active_slots: List[str]) -> None:
-        """Update a client's active slots by finding/creating a matching menu_category."""
-        cat_name = self.find_or_create_menu_category(active_slots)
-        self._sb.table('clients').update({
-            'menu_category': cat_name,
-        }).eq('name', name).execute()
-
-    def update_client_slot_counts(self, name: str, overrides: Dict[str, int]) -> None:
-        self._sb.table('slot_count_overrides').delete().eq('client_name', name).execute()
-        rows = [
-            {'client_name': name, 'slot': k, 'count': int(v)}
-            for k, v in overrides.items()
-            if k in BASE_SLOTS and int(v) != 1
-        ]
-        if rows:
-            self._sb.table('slot_count_overrides').insert(rows).execute()
-
-    def update_client_theme_overrides(self, name: str, theme_map: Dict[str, str]) -> None:
-        self._sb.table('theme_overrides').delete().eq('client_name', name).execute()
-        rows = [
-            {'client_name': name, 'day': day, 'theme': theme}
-            for day, theme in theme_map.items()
-            if day in DEFAULT_THEME_MAP
-            and theme in AVAILABLE_THEMES
-            and theme != DEFAULT_THEME_MAP.get(day)
-        ]
-        if rows:
-            self._sb.table('theme_overrides').insert(rows).execute()
-
     # ---- validation --------------------------------------------------------
 
     def validate(self):
         """Validate configuration consistency. Raises ValueError on problems."""
         all_slots_set = set(BASE_SLOTS) | set(CONST_SLOTS)
+        rows = (
+            self._sb.table('clients')
+            .select(_CLIENT_COLUMNS)
+            .execute()
+        )
+        for row in rows.data or []:
+            client_name = row.get('name', '<unnamed>')
+            raw_counters = _as_json(row.get('counters'), []) or []
+            if isinstance(raw_counters, dict):
+                raw_counters = [raw_counters]
+            if not raw_counters:
+                raise ValueError(
+                    f"Client '{client_name}' has no counters configured."
+                )
+            seen_names: Set[str] = set()
+            for idx, entry in enumerate(raw_counters, start=1):
+                if not isinstance(entry, dict):
+                    raise ValueError(
+                        f"Client '{client_name}' counter #{idx} is not an "
+                        f"object: {entry!r}"
+                    )
+                cname = str(entry.get('name') or f'Counter {idx}').strip()
+                key = cname.lower()
+                if key in seen_names:
+                    raise ValueError(
+                        f"Client '{client_name}' has duplicate counter name: "
+                        f"{cname!r}"
+                    )
+                seen_names.add(key)
 
-        # Validate menu_categories
-        cats = self.menu_categories
-        for cat_name, cat_slots in cats.items():
-            bad = [s for s in cat_slots if s not in all_slots_set]
-            if bad:
-                raise ValueError(f"Category '{cat_name}' has unknown slot(s): {bad}")
+                categories = entry.get('categories') or []
+                if not isinstance(categories, (list, tuple)) or not categories:
+                    raise ValueError(
+                        f"Client '{client_name}' counter '{cname}' has no "
+                        f"categories."
+                    )
+                bad = [
+                    s for s in categories
+                    if str(s).strip().lower() not in all_slots_set
+                ]
+                if bad:
+                    raise ValueError(
+                        f"Client '{client_name}' counter '{cname}' has unknown "
+                        f"slot(s): {bad}"
+                    )
 
-        # Validate clients
-        rows = self._sb.table('clients').select('name, menu_category').execute()
-        client_set = set()
-        for r in rows.data:
-            client_set.add(r['name'])
-            cat = r.get('menu_category', '')
-            if cat and cat not in cats:
-                raise ValueError(f"Client '{r['name']}' references unknown category: {cat}")
+                counts = entry.get('slot_counts') or {}
+                if not isinstance(counts, dict):
+                    raise ValueError(
+                        f"Client '{client_name}' counter '{cname}' has a "
+                        f"non-object slot_counts."
+                    )
+                for slot, count in counts.items():
+                    if str(slot).strip().lower() not in all_slots_set:
+                        raise ValueError(
+                            f"Client '{client_name}' counter '{cname}' has a "
+                            f"count for unknown slot: {slot}"
+                        )
+                    try:
+                        if int(count) < 0:
+                            raise ValueError
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            f"Client '{client_name}' counter '{cname}' has an "
+                            f"invalid count for {slot}: {count!r}"
+                        ) from None
 
-        base_set = set(BASE_SLOTS)
-        sco_rows = self._sb.table('slot_count_overrides').select('client_name, slot').execute()
-        for r in sco_rows.data:
-            if r['client_name'] not in client_set:
-                raise ValueError(f"slot_count_overrides has unknown client: {r['client_name']}")
-            if r['slot'] not in base_set:
-                raise ValueError(f"slot_count_overrides[{r['client_name']}] has unknown slot: {r['slot']}")
-
-        to_rows = self._sb.table('theme_overrides').select('client_name, day, theme').execute()
-        for r in to_rows.data:
-            if r['client_name'] not in client_set:
-                raise ValueError(f"theme_overrides has unknown client: {r['client_name']}")
-            if r['day'].lower() not in DEFAULT_THEME_MAP:
-                raise ValueError(f"theme_overrides[{r['client_name']}] has invalid day: {r['day']}")
-            if r['theme'] not in AVAILABLE_THEMES:
-                raise ValueError(f"theme_overrides[{r['client_name']}] has invalid theme: {r['theme']}")
+                themes = entry.get('theme_map') or {}
+                if not isinstance(themes, dict):
+                    raise ValueError(
+                        f"Client '{client_name}' counter '{cname}' has a "
+                        f"non-object theme_map."
+                    )
+                for day, theme in themes.items():
+                    if str(day).strip().lower() not in ALL_DAY_NAMES:
+                        raise ValueError(
+                            f"Client '{client_name}' counter '{cname}' has an "
+                            f"invalid day: {day}"
+                        )
+                    if str(theme).strip().lower() not in AVAILABLE_THEMES:
+                        raise ValueError(
+                            f"Client '{client_name}' counter '{cname}' has an "
+                            f"invalid theme: {theme}"
+                        )

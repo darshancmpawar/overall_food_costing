@@ -1,6 +1,11 @@
 -- =============================================================================
 -- Users table for Ikigai Masala authentication
 -- Run this in the Supabase SQL Editor (Dashboard > SQL Editor > New query)
+--
+-- OPTIONAL. api/app.py currently registers no auth routes and no
+-- decorators, so nothing in the running app reads this table — a database
+-- without it is expected. Run this (and scripts/seed_admin.py) only if you
+-- wire user_authentication/ + api/auth.py back into the API.
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS users (

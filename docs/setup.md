@@ -36,10 +36,29 @@ In the Supabase SQL editor, run each of these once. Re-running is idempotent
 (all `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`):
 
 ```
-scripts/create_tables.sql          clients, menu_categories, slot_count_overrides, theme_overrides, app_settings
+scripts/create_tables.sql          clients (counters, city, serve_weekends,
+                                   item_cooldown_days, source_pools), app_settings
 scripts/create_history_tables.sql  menu_history, week_signatures
-scripts/create_users_table.sql     users (auth)
 ```
+
+Upgrading a database that predates the counters schema (it still has
+`menu_category`, `menu_categories`, `slot_count_overrides`,
+`theme_overrides`, or a long-form `menu_history` with `slot` /
+`item_base` columns)? Run one more file, after the two above:
+
+```
+scripts/migrate_to_counters.sql    folds the side tables into clients.counters
+                                   and rolls menu_history into one jsonb per day
+```
+
+It leaves the old tables in place so you can verify first; the DROP
+statements to run by hand are at the bottom of the file. `GET
+/api/v1/health` reports `schema.status: "drift_detected"` and names the
+missing columns until the migration is applied.
+
+`scripts/create_users_table.sql` is only needed if the authentication
+layer is wired back into `api/app.py`. The current build has no login
+path, so a database without a `users` table is expected.
 
 ---
 

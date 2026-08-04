@@ -175,6 +175,19 @@ client = _get_api_client(_BACKEND_URL)
 def _cached_list_clients(_api: MenuApiClient) -> list:
     return _api.list_clients()
 
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_list_counters(_api: MenuApiClient, client_name: str) -> list:
+    """Counter names for a client, cached like the client list.
+
+    A client's counters only change through the editor (which clears the
+    cache), so re-reading them on every sidebar rerun would be pure
+    round-trips.
+    """
+    if not client_name:
+        return []
+    return _api.list_counters(client_name)
+
 # ---------------------------------------------------------------------------
 # Session state initialization (only after auth)
 # ---------------------------------------------------------------------------
@@ -184,6 +197,10 @@ _SESSION_DEFAULTS = {
     "day_types": {},
     "pool_warnings": [],
     "client_name": None,
+    # Counter the on-screen plan belongs to. Save / regenerate must use
+    # this rather than the sidebar's current pick, or switching the picker
+    # after generating would write one line's menu under another's name.
+    "counter_name": None,
     "changes_log": [],
     "view": "planner",
     # "history" when the current plan was loaded from /saved-plan,
@@ -242,13 +259,32 @@ with st.sidebar:
     selected_client = st.selectbox("Client",
         clients_list if clients_list else ["(no clients)"],
         key="planner_client_select")
+
+    # Counter picker. A client's serving lines each have their own slot
+    # set and day themes, so the planner works one counter at a time.
+    # Single-counter clients (most of them) get no extra widget.
+    counters_list = []
+    if selected_client and selected_client != "(no clients)":
+        try:
+            counters_list = _cached_list_counters(client, selected_client)
+        except (ConnectionError, OSError, ValueError, RuntimeError) as e:
+            st.warning(f"Couldn't load counters ({e}).")
+    selected_counter = counters_list[0] if counters_list else None
+    if len(counters_list) > 1:
+        selected_counter = st.selectbox(
+            "Counter", counters_list, key="planner_counter_select",
+            help="Each counter is a separate serving line with its own "
+                 "menu shape and day themes.",
+        )
+
     start_date = st.date_input("Start date", value=dt.date.today(),
                                min_value=dt.date(2020, 1, 1),
                                max_value=dt.date.today() + dt.timedelta(days=730),
                                key="planner_start_date")
-    num_days = st.slider("Weekdays", min_value=1, max_value=10, value=5,
+    num_days = st.slider("Service days", min_value=1, max_value=10, value=5,
                          key="planner_num_days",
-                         help="Number of weekdays (Sat/Sun are skipped)")
+                         help="Number of service days. Sat/Sun are skipped "
+                              "unless the client serves weekends.")
 
     st.divider()
     generate_clicked = st.button("Generate Menu Plan", type="primary",
@@ -376,9 +412,13 @@ with _hdr_col1:
                 f'background:{bg};color:{fg};vertical-align:middle;">'
                 f'{html.escape(label)}</span>'
             )
+        _counter_label = st.session_state.get("counter_name")
+        _who = html.escape(st.session_state.client_name)
+        if _counter_label:
+            _who += f' &middot; {html.escape(str(_counter_label))}'
         st.markdown(
             f'<p class="page-subtitle">Generated plan for '
-            f'{html.escape(st.session_state.client_name)}{badge_html}</p>',
+            f'{_who}{badge_html}</p>',
             unsafe_allow_html=True)
     else:
         st.markdown(
@@ -406,6 +446,7 @@ if generate_clicked:
                 client_name=selected_client,
                 start_date=start_date.isoformat(),
                 num_days=num_days,
+                counter=selected_counter,
             )
         except (ConnectionError, OSError, ValueError, RuntimeError) as e:
             # Failure here is non-fatal — fall through to the solver
@@ -422,6 +463,9 @@ if generate_clicked:
                 st.session_state.plan_dates = sorted(flat_plan.keys())
                 st.session_state.day_types = day_types
                 st.session_state.client_name = selected_client
+                st.session_state.counter_name = (
+                    saved.get("counter") or selected_counter
+                )
                 st.session_state.changes_log = []
                 st.session_state.pool_warnings = []
                 st.session_state.plan_source = "history"
@@ -437,6 +481,7 @@ if generate_clicked:
                         start_date=start_date.isoformat(),
                         num_days=num_days,
                         time_limit_seconds=_planning_time_limit(num_days),
+                        counter=selected_counter,
                     )
                     _raw_solution = result.get("solution", {})
                     flat_plan, day_types = flatten_api_solution(_raw_solution)
@@ -444,6 +489,9 @@ if generate_clicked:
                     st.session_state.plan_dates = sorted(flat_plan.keys())
                     st.session_state.day_types = day_types
                     st.session_state.client_name = selected_client
+                    st.session_state.counter_name = (
+                        result.get("counter") or selected_counter
+                    )
                     st.session_state.changes_log = []
                     st.session_state.pool_warnings = result.get("pool_warnings", [])
                     st.session_state.plan_source = "solver"
@@ -466,6 +514,7 @@ if generate_clicked:
                     st.session_state.plan_dates = []
                     st.session_state.day_types = {}
                     st.session_state.client_name = selected_client
+                    st.session_state.counter_name = selected_counter
                     st.session_state.changes_log = []
                     st.session_state.pool_warnings = []
                     st.session_state.plan_source = "preflight_blocked"
@@ -520,10 +569,15 @@ if plan and plan_dates:
     total_items = sum(1 for d in plan_dates for s in sorted_slots
                       if plan.get(d, {}).get(s, ""))
 
+    _counter_metric = st.session_state.get("counter_name") or "—"
     st.markdown(f"""<div class="metrics-grid">
         <div class="metric-card">
             <div class="metric-label">Client</div>
             <div class="metric-value">{html.escape(st.session_state.client_name or "")}</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">Counter</div>
+            <div class="metric-value">{html.escape(str(_counter_metric))}</div>
         </div>
         <div class="metric-card">
             <div class="metric-label">Days</div>
@@ -607,7 +661,7 @@ if plan and plan_dates:
         )
         if st.button("Clear plan and reload", key="err_clear_plan"):
             for _k in ("plan", "plan_dates", "day_types", "pool_warnings",
-                       "client_name", "changes_log"):
+                       "client_name", "counter_name", "changes_log"):
                 st.session_state.pop(_k, None)
             st.rerun()
 
@@ -628,7 +682,8 @@ if plan and plan_dates:
                      use_container_width=True):
             try:
                 client.save(client_name=st.session_state.client_name,
-                            week_plan=plan, week_start=plan_dates[0])
+                            week_plan=plan, week_start=plan_dates[0],
+                            counter=st.session_state.counter_name)
                 # After Save, what's on screen now matches what's in the
                 # DB — flip the source badge so the user can tell the
                 # plan is persisted (and the next Generate for these
@@ -654,7 +709,14 @@ if plan and plan_dates:
                 row.append(format_item_for_ui(plan.get(d_str, {}).get(slot_id, "")))
             writer.writerow(row)
         st.download_button("Download CSV", data=buf.getvalue(),
-            file_name=f"menu_{st.session_state.client_name}.csv",
+            file_name=(
+                f"menu_{st.session_state.client_name}"
+                + (
+                    f"_{st.session_state.counter_name}"
+                    if st.session_state.get("counter_name") else ""
+                )
+                + ".csv"
+            ),
             mime="text/csv", key="planner_download_csv_btn",
             use_container_width=True)
     with c3:
@@ -726,7 +788,8 @@ if plan and plan_dates:
                             base_plan=plan, replace_slots=regen_selections,
                             start_date=plan_dates[0],
                             num_days=len(plan_dates),
-                            time_limit_seconds=_planning_time_limit(len(plan_dates)))
+                            time_limit_seconds=_planning_time_limit(len(plan_dates)),
+                            counter=st.session_state.counter_name)
                         _raw_regen = result.get("solution", {})
                         flat_regen, regen_day_types = flatten_api_solution(_raw_regen)
                         st.session_state.cost_data = extract_cost_data(_raw_regen)

@@ -1,13 +1,31 @@
 #!/usr/bin/env python3
 """
-Migrate clients.json into Supabase.
+Seed Supabase from a clients JSON file.
 
 Usage:
   export SUPABASE_URL="https://your-project.supabase.co"
   export SUPABASE_KEY="your-anon-or-service-role-key"
   python scripts/seed_supabase.py [--json data/configs/clients.json]
 
-This script is idempotent — it uses upsert so re-running is safe.
+Accepts either shape of ``clients.json``:
+
+* **counters** (current) — each client carries its serving lines inline::
+
+      {"clients": [{"name": "Amadeus",
+                    "city": "Bangalore",
+                    "serve_weekends": false,
+                    "item_cooldown_days": 20,
+                    "source_pools": ["amadeus"],
+                    "counters": [{"name": "South",
+                                  "categories": [...],
+                                  "slot_counts": {...},
+                                  "theme_map": {...}}]}]}
+
+* **legacy** — ``menu_category`` + the ``menu_categories`` /
+  ``slot_count_overrides`` / ``theme_overrides`` maps, which are folded
+  into a single "Counter 1" per client on the way in.
+
+This script is idempotent — it upserts, so re-running is safe.
 """
 
 import argparse
@@ -17,6 +35,43 @@ import sys
 from pathlib import Path
 
 from supabase import create_client
+
+DEFAULT_COUNTER_NAME = "Counter 1"
+
+
+def _counters_from_legacy(client, data):
+    """Fold the legacy side-maps into a one-counter list for *client*."""
+    name = client["name"]
+    categories = data.get("menu_categories", {}).get(
+        client.get("menu_category", ""), [],
+    )
+    return [{
+        "name": DEFAULT_COUNTER_NAME,
+        "categories": list(categories),
+        "slot_counts": {
+            slot: int(count) for slot, count in
+            data.get("slot_count_overrides", {}).get(name, {}).items()
+        },
+        "theme_map": {
+            day.lower(): theme for day, theme in
+            data.get("theme_overrides", {}).get(name, {}).items()
+        },
+    }]
+
+
+def _client_row(client, data):
+    """Return the ``clients`` row for one entry of the JSON file."""
+    counters = client.get("counters")
+    if not counters:
+        counters = _counters_from_legacy(client, data)
+    return {
+        "name": client["name"],
+        "counters": counters,
+        "city": client.get("city") or None,
+        "serve_weekends": bool(client.get("serve_weekends", False)),
+        "item_cooldown_days": int(client.get("item_cooldown_days", 20)),
+        "source_pools": list(client.get("source_pools") or []),
+    }
 
 
 def main():
@@ -39,52 +94,21 @@ def main():
     with open(args.json) as f:
         data = json.load(f)
 
-    # 1. Upsert menu categories (must be done first — clients FK references them)
-    categories = data.get("menu_categories", {})
-    cat_rows = [{"name": name, "slots": slots} for name, slots in categories.items()]
-    if cat_rows:
-        sb.table("menu_categories").upsert(cat_rows).execute()
-    print(f"  Upserted {len(cat_rows)} menu categories")
-
-    # 2. Upsert clients
-    client_rows = [
-        {"name": c["name"], "menu_category": c["menu_category"]}
-        for c in data["clients"]
-    ]
+    # 1. Clients — counters, settings, and source pools all in one row.
+    client_rows = [_client_row(c, data) for c in data["clients"]]
+    empty = [r["name"] for r in client_rows if not r["counters"][0]["categories"]]
+    if empty:
+        print(
+            "  WARNING: these clients have no categories and won't be "
+            f"plannable until you fix them in the editor: {', '.join(empty)}"
+        )
     sb.table("clients").upsert(client_rows).execute()
     print(f"  Upserted {len(client_rows)} clients")
 
-    # 3. Upsert slot count overrides
-    sco_rows = []
-    for client_name, overrides in data.get("slot_count_overrides", {}).items():
-        for slot, count in overrides.items():
-            sco_rows.append({
-                "client_name": client_name,
-                "slot": slot,
-                "count": int(count),
-            })
-    if sco_rows:
-        sb.table("slot_count_overrides").upsert(sco_rows).execute()
-    print(f"  Upserted {len(sco_rows)} slot count overrides")
-
-    # 4. Upsert theme overrides
-    to_rows = []
-    for client_name, themes in data.get("theme_overrides", {}).items():
-        for day, theme in themes.items():
-            to_rows.append({
-                "client_name": client_name,
-                "day": day.lower(),
-                "theme": theme,
-            })
-    if to_rows:
-        sb.table("theme_overrides").upsert(to_rows).execute()
-    print(f"  Upserted {len(to_rows)} theme overrides")
-
-    # 5. Upsert app settings
+    # 2. App settings. JSONB columns take real JSON, not a JSON string.
     settings = [
-        {"key": "core_min_one_slots", "value": json.dumps(data.get("core_min_one_slots", []))},
-        {"key": "constant_slots", "value": json.dumps(data.get("constant_slots", []))},
-        {"key": "fallback_menu_category", "value": json.dumps(data.get("fallback_menu_category", ""))},
+        {"key": "core_min_one_slots", "value": data.get("core_min_one_slots", [])},
+        {"key": "constant_slots", "value": data.get("constant_slots", [])},
     ]
     sb.table("app_settings").upsert(settings).execute()
     print(f"  Upserted {len(settings)} app settings")

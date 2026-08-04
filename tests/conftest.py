@@ -46,6 +46,51 @@ def ensure_sample_data_exists(sample_data_path):
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_TEST_CATEGORIES = [
+    'welcome_drink', 'starter', 'soup', 'salad',
+    'rice', 'dal', 'veg_gravy', 'veg_dry', 'bread',
+    'curd_side', 'dessert',
+]
+
+
+def make_client_row(
+    name='Rippling',
+    categories=None,
+    counters=None,
+    version=1,
+    city='Bangalore',
+    serve_weekends=False,
+    item_cooldown_days=20,
+    source_pools=None,
+):
+    """Build a ``clients`` row in the counters schema.
+
+    Defaults to a single "Counter 1" line so single-counter tests stay
+    short; pass *counters* to describe several serving lines.
+    """
+    if counters is None:
+        counters = [{
+            'name': 'Counter 1',
+            'categories': list(
+                categories if categories is not None
+                else DEFAULT_TEST_CATEGORIES
+            ),
+            'slot_counts': {},
+            'theme_map': {},
+        }]
+    return {
+        'name': name,
+        'counters': counters,
+        'city': city,
+        'serve_weekends': serve_weekends,
+        'item_cooldown_days': item_cooldown_days,
+        'source_pools': list(source_pools or []),
+        # version=1 mirrors the Supabase schema default and is what
+        # /client-config GET returns for a fresh row.
+        'version': version,
+    }
+
+
 @pytest.fixture
 def seeded_fake_supabase():
     """Build a FakeSupabase pre-seeded with one usable client + schema.
@@ -56,23 +101,7 @@ def seeded_fake_supabase():
     from tests.fake_supabase import FakeSupabase
 
     fake = FakeSupabase(seed={
-        'clients': [
-            # version=1 mirrors the Supabase schema default and is
-            # what /client-config GET returns for a fresh row.
-            {'name': 'Rippling', 'menu_category': 'default_cat', 'version': 1},
-        ],
-        'menu_categories': [
-            {
-                'name': 'default_cat',
-                'slots': [
-                    'welcome_drink', 'starter', 'soup', 'salad',
-                    'rice', 'dal', 'veg_gravy', 'veg_dry', 'bread',
-                    'curd_side', 'dessert',
-                ],
-            },
-        ],
-        'slot_count_overrides': [],
-        'theme_overrides': [],
+        'clients': [make_client_row()],
         'app_settings': [],
         'menu_history': [],
         'week_signatures': [],

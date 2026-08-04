@@ -138,7 +138,7 @@ class TestHealthEndpoint:
                     def select(self_inner, *_a, **_kw): return self_inner
                     def limit(self_inner, _n): return self_inner
                     def execute(self_inner):
-                        raise _Pg42703('column "version" does not exist')
+                        raise _Pg42703('column "counters" does not exist')
                 return _T()
 
         monkeypatch.setattr(
@@ -147,7 +147,8 @@ class TestHealthEndpoint:
         reachable, schema_info = api_app._probe_supabase()
         assert reachable is True
         assert schema_info["status"] == "drift_detected"
-        assert "clients.version" in schema_info["missing"]
+        assert "clients.counters" in schema_info["missing"]
+        assert "menu_history.menu" in schema_info["missing"]
         # Loud error logged once per drift episode.
         assert any(
             "Schema drift" in rec.message and "scripts/create_tables.sql" in rec.message
@@ -421,18 +422,22 @@ class TestSaveEndpoint:
         self, client, auth_headers, fake_supabase,
     ):
         """Re-saving the same week with a different plan replaces the
-        previously stored rows. Without this, the cooldown rules would
+        previously stored menu. Without this, the cooldown rules would
         see two conflicting items for the same (date, slot) and
         ``/saved-plan`` couldn't reliably tell which one to return.
         """
+        def _saved_menu():
+            rows = fake_supabase.rows('menu_history')
+            assert len(rows) == 1, f"expected one row per day, got {rows}"
+            return rows[0]['menu']['counters']['Counter 1']
+
         first = client.post('/api/v1/save', json={
             'client_name': 'Rippling',
             'week_plan': {'2026-03-23': {'rice': 'jeera_rice(Y)'}},
             'week_start': '2026-03-23',
         }, headers=auth_headers)
         assert first.status_code == 200
-        rows = fake_supabase.rows('menu_history')
-        assert [r['item_base'] for r in rows] == ['jeera_rice']
+        assert _saved_menu() == {'rice': 'jeera_rice'}
 
         second = client.post('/api/v1/save', json={
             'client_name': 'Rippling',
@@ -440,10 +445,9 @@ class TestSaveEndpoint:
             'week_start': '2026-03-23',
         }, headers=auth_headers)
         assert second.status_code == 200
-        rows = fake_supabase.rows('menu_history')
-        assert [r['item_base'] for r in rows] == ['lemon_rice']
+        assert _saved_menu() == {'rice': 'lemon_rice'}
         # week_signatures also overwrites — exactly one row per
-        # (client, week_start) post-save.
+        # (client, week_start, counter) post-save.
         assert len(fake_supabase.rows('week_signatures')) == 1
 
 
@@ -540,6 +544,289 @@ class TestSavedPlanEndpoint:
         assert body['covered_dates'] == ['2026-03-23']
 
 
+class TestCounterEndpoints:
+    """Coverage for the multi-counter surface: a client's serving lines
+    each carry their own slots, themes, and saved history."""
+
+    @pytest.fixture
+    def multi_counter(self, fake_supabase):
+        """Add a two-counter client to the seeded fake."""
+        from tests.conftest import make_client_row
+        fake_supabase.seed('clients', [make_client_row(
+            name='Amadeus',
+            counters=[
+                {
+                    'name': 'South',
+                    'categories': ['bread', 'rice', 'veg_dry', 'veg_gravy',
+                                   'sambar', 'rasam', 'dessert', 'salad'],
+                    'slot_counts': {},
+                    'theme_map': {'monday': 'south'},
+                },
+                {
+                    'name': 'North',
+                    'categories': ['bread', 'rice', 'veg_dry', 'veg_gravy',
+                                   'dal', 'dessert'],
+                    'slot_counts': {'veg_dry': 2},
+                    'theme_map': {'monday': 'north'},
+                },
+            ],
+            serve_weekends=True,
+            item_cooldown_days=30,
+        )])
+        return fake_supabase
+
+    def test_list_counters(self, client, auth_headers, multi_counter):
+        resp = client.get('/api/v1/client-counters/Amadeus', headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.get_json()['counters'] == ['South', 'North']
+
+    def test_list_counters_unknown_client_404s(
+        self, client, auth_headers, fake_supabase,
+    ):
+        resp = client.get('/api/v1/client-counters/Nope', headers=auth_headers)
+        assert resp.status_code == 404
+
+    def test_client_config_defaults_to_first_counter(
+        self, client, auth_headers, multi_counter,
+    ):
+        body = client.get(
+            '/api/v1/client-config/Amadeus', headers=auth_headers,
+        ).get_json()
+        assert body['counter'] == 'South'
+        assert [c['name'] for c in body['counters']] == ['South', 'North']
+        assert 'sambar' in body['active_base_slots']
+        assert body['serve_weekends'] is True
+        assert body['item_cooldown_days'] == 30
+
+    def test_client_config_honours_counter_query(
+        self, client, auth_headers, multi_counter,
+    ):
+        body = client.get(
+            '/api/v1/client-config/Amadeus?counter=North', headers=auth_headers,
+        ).get_json()
+        assert body['counter'] == 'North'
+        assert 'dal' in body['active_base_slots']
+        assert body['slot_counts']['veg_dry'] == 2
+        # Slots this line doesn't serve must not appear as zero-count noise.
+        assert 'sambar' not in body['slot_counts']
+
+    def test_unknown_counter_is_a_client_error(
+        self, client, auth_headers, multi_counter,
+    ):
+        resp = client.get(
+            '/api/v1/client-config/Amadeus?counter=Rooftop',
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404
+        assert 'Unknown counter' in resp.get_json()['error']
+
+    def test_put_edits_only_the_named_counter(
+        self, client, auth_headers, multi_counter,
+    ):
+        resp = client.put('/api/v1/client-config/Amadeus', json={
+            'version': 1,
+            'counter': 'North',
+            'active_base_slots': ['bread', 'rice'],
+        }, headers=auth_headers)
+        assert resp.status_code == 200
+
+        south = client.get(
+            '/api/v1/client-config/Amadeus?counter=South', headers=auth_headers,
+        ).get_json()
+        assert 'sambar' in south['active_base_slots']
+        north = client.get(
+            '/api/v1/client-config/Amadeus?counter=North', headers=auth_headers,
+        ).get_json()
+        assert north['active_base_slots'] == ['bread', 'rice']
+
+    def test_put_rejects_unknown_counter_without_create_flag(
+        self, client, auth_headers, multi_counter,
+    ):
+        resp = client.put('/api/v1/client-config/Amadeus', json={
+            'version': 1,
+            'counter': 'Rooftop',
+            'active_base_slots': ['bread'],
+        }, headers=auth_headers)
+        assert resp.status_code == 400
+        assert 'Unknown counter' in resp.get_json()['error']
+
+    def test_put_can_create_a_counter(
+        self, client, auth_headers, multi_counter,
+    ):
+        resp = client.put('/api/v1/client-config/Amadeus', json={
+            'version': 1,
+            'counter': 'Chinese',
+            'create_counter': True,
+            'active_base_slots': ['rice', 'veg_gravy'],
+        }, headers=auth_headers)
+        assert resp.status_code == 200
+        counters = client.get(
+            '/api/v1/client-counters/Amadeus', headers=auth_headers,
+        ).get_json()['counters']
+        assert counters == ['South', 'North', 'Chinese']
+
+    def test_put_can_delete_a_counter(
+        self, client, auth_headers, multi_counter,
+    ):
+        resp = client.put('/api/v1/client-config/Amadeus', json={
+            'version': 1, 'delete_counter': 'North',
+        }, headers=auth_headers)
+        assert resp.status_code == 200
+        counters = client.get(
+            '/api/v1/client-counters/Amadeus', headers=auth_headers,
+        ).get_json()['counters']
+        assert counters == ['South']
+
+    def test_put_updates_client_settings(
+        self, client, auth_headers, multi_counter,
+    ):
+        resp = client.put('/api/v1/client-config/Amadeus', json={
+            'version': 1,
+            'city': 'Chennai',
+            'serve_weekends': False,
+            'item_cooldown_days': 10,
+            'source_pools': ['amadeus', ' '],
+        }, headers=auth_headers)
+        assert resp.status_code == 200
+        body = client.get(
+            '/api/v1/client-config/Amadeus', headers=auth_headers,
+        ).get_json()
+        assert body['city'] == 'Chennai'
+        assert body['serve_weekends'] is False
+        assert body['item_cooldown_days'] == 10
+        assert body['source_pools'] == ['amadeus']
+
+    def test_put_rejects_negative_cooldown_without_bumping_version(
+        self, client, auth_headers, multi_counter,
+    ):
+        resp = client.put('/api/v1/client-config/Amadeus', json={
+            'version': 1, 'item_cooldown_days': -5,
+        }, headers=auth_headers)
+        assert resp.status_code == 400
+        # A rejected payload must not consume the version, or the admin's
+        # next (valid) save would 409 for no reason.
+        body = client.get(
+            '/api/v1/client-config/Amadeus', headers=auth_headers,
+        ).get_json()
+        assert body['version'] == 1
+
+    def test_save_and_load_are_scoped_per_counter(
+        self, client, auth_headers, multi_counter,
+    ):
+        for counter, item in (('South', 'bisi_bele_bhat'), ('North', 'kashmiri_pulao')):
+            resp = client.post('/api/v1/save', json={
+                'client_name': 'Amadeus',
+                'counter': counter,
+                'week_plan': {'2026-03-23': {'rice': f'{item}(Y)'}},
+                'week_start': '2026-03-23',
+            }, headers=auth_headers)
+            assert resp.status_code == 200
+
+        # One row for the day holds both lines' menus.
+        rows = multi_counter.rows('menu_history')
+        assert len(rows) == 1
+        assert set(rows[0]['menu']['counters']) == {'South', 'North'}
+
+        for counter, item in (('South', 'bisi_bele_bhat'), ('North', 'kashmiri_pulao')):
+            body = client.get(
+                f'/api/v1/saved-plan?client_name=Amadeus&counter={counter}'
+                '&start_date=2026-03-23&num_days=1',
+                headers=auth_headers,
+            ).get_json()
+            assert body['exists'] is True
+            assert body['counter'] == counter
+            assert body['solution']['2026-03-23']['items']['rice']['item_base'] == item
+
+    def test_save_rejects_unknown_counter(
+        self, client, auth_headers, multi_counter,
+    ):
+        resp = client.post('/api/v1/save', json={
+            'client_name': 'Amadeus',
+            'counter': 'Rooftop',
+            'week_plan': {'2026-03-23': {'rice': 'x'}},
+            'week_start': '2026-03-23',
+        }, headers=auth_headers)
+        assert resp.status_code == 400
+        assert 'Unknown counter' in resp.get_json()['error']
+
+    def test_weekend_client_plans_consecutive_days(
+        self, client, auth_headers, multi_counter,
+    ):
+        """serve_weekends=true means a 3-day plan from a Friday covers
+        Fri/Sat/Sun rather than skipping to the following Tuesday."""
+        body = client.get(
+            '/api/v1/saved-plan?client_name=Amadeus&counter=South'
+            '&start_date=2026-03-20&num_days=3',
+            headers=auth_headers,
+        ).get_json()
+        assert sorted(body['solution'].keys()) == [
+            '2026-03-20', '2026-03-21', '2026-03-22',
+        ]
+
+    def test_weekday_client_still_skips_the_weekend(
+        self, client, auth_headers, fake_supabase,
+    ):
+        body = client.get(
+            '/api/v1/saved-plan?client_name=Rippling'
+            '&start_date=2026-03-20&num_days=3',
+            headers=auth_headers,
+        ).get_json()
+        assert sorted(body['solution'].keys()) == [
+            '2026-03-20', '2026-03-23', '2026-03-24',
+        ]
+
+
+class TestEditorMetadataEndpoint:
+    def test_exposes_slot_and_theme_vocabulary(
+        self, client, auth_headers, fake_supabase,
+    ):
+        body = client.get(
+            '/api/v1/editor-metadata', headers=auth_headers,
+        ).get_json()
+        assert body['success'] is True
+        # Slots added with the counters schema must be offerable.
+        for slot in ('curd', 'curd_rice', 'dal_sambar', 'sambar_rasam'):
+            assert slot in body['base_slot_names']
+        assert 'chinese_continental' in body['available_themes']
+        assert body['weekday_names'][0] == 'monday'
+        assert 'saturday' in body['all_day_names']
+
+
+class TestCreateClientEndpoint:
+    def test_creates_with_counter_and_settings(
+        self, client, auth_headers, fake_supabase,
+    ):
+        resp = client.post('/api/v1/client', json={
+            'name': 'NewCo',
+            'active_slots': ['bread', 'rice', 'dessert'],
+            'counter': 'Main Line',
+            'theme_map': {'monday': 'south'},
+            'city': 'Pune',
+            'serve_weekends': True,
+            'item_cooldown_days': 12,
+            'source_pools': ['newco'],
+        }, headers=auth_headers)
+        assert resp.status_code == 200
+
+        body = client.get(
+            '/api/v1/client-config/NewCo', headers=auth_headers,
+        ).get_json()
+        assert body['counter'] == 'Main Line'
+        assert body['city'] == 'Pune'
+        assert body['serve_weekends'] is True
+        assert body['item_cooldown_days'] == 12
+        assert body['source_pools'] == ['newco']
+        assert body['theme_map']['monday'] == 'south'
+
+    def test_duplicate_name_is_rejected(
+        self, client, auth_headers, fake_supabase,
+    ):
+        resp = client.post('/api/v1/client', json={
+            'name': 'Rippling', 'active_slots': ['bread'],
+        }, headers=auth_headers)
+        assert resp.status_code == 409
+
+
 class TestClientNamesRequestCache:
     """Within one request, client_names should be read from Supabase at most
     once; across separate requests, every request must hit Supabase again so
@@ -565,9 +852,9 @@ class TestClientNamesRequestCache:
         monkeypatch.setattr(api_app, "_get_client_loader", lambda: _CountingLoader())
 
         # /api/v1/clients both validates via the decorator (none here) and
-        # reads client_names in the body. editor-metadata reads it too.
-        # Use editor-metadata because it also pulls menu_categories — a
-        # good smoke that multiple cached keys coexist.
+        # reads client_names in the body. editor-metadata reads it too, so
+        # use that — it exercises the cache alongside the other metadata
+        # the endpoint assembles.
         resp = client.get('/api/v1/editor-metadata', headers=auth_headers)
         assert resp.status_code == 200
         assert calls["n"] == 1, (

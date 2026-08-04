@@ -60,8 +60,9 @@ graph TD
 - **Hard vs. soft severity:** rules declare `severity = HARD` (default) or `SOFT`. A hard rule that raises in `apply()` fails the solve instead of silently dropping the constraint; soft rules log + continue + surface in the response's `rule_warnings`.
 - **No config cache:** `ClientConfigLoader` reads Supabase on every call so edits are live with no restart. Per-request memoization on Flask's `g` avoids the intra-request round trips.
 - **Dynamic worker allocation:** `api/concurrency.py` caps concurrent solves (`MAX_RUNNING=2`) and tunes CP-SAT worker count to RAM (1 active → 9 workers, 2 active → 5 each).
-- **History split:** `menu_history` is item-level (one row per `(date, slot, item)`), `week_signatures` is week-level (a deterministic `|`-delimited hash of a saved week). The former drives item cooldown; the latter drives week-signature cooldown.
-- **Optimistic concurrency:** the `clients` table carries a `version` column. `GET /client-config` returns it as an ETag; `PUT` must send it back, mismatch returns 409 so two admins editing the same client can't last-write-wins.
+- **History split:** `menu_history` is day-level (one row per `(client, date)` whose `menu` jsonb nests each counter's `{slot: item}` map), `week_signatures` is week-level (a deterministic `|`-delimited hash of a saved week, prefixed with its counter). The former drives item cooldown; the latter drives week-signature cooldown. `HistoryManager.expand_menu_rows()` flattens the jsonb back into the long `(date, slot, item_base, counter_name)` frame the cooldown rules are written against, so the storage shape and the in-memory shape can differ without either side caring.
+- **Counters:** a client's serving lines live in `clients.counters` (jsonb), each with its own `categories`, `slot_counts`, and `theme_map`. The solver plans one counter at a time — `ClientConfig` projects the selected counter's slots/themes onto the same fields the engine has always read, so counters are a config-layer concept the solver never has to know about. Cooldowns and saved history are scoped per counter, since three lines sharing one cooldown window would exhaust the item pools three times as fast.
+- **Optimistic concurrency:** the `clients` table carries a `version` column. `GET /client-config` returns it as an ETag; `PUT` must send it back, mismatch returns 409 so two admins editing the same client can't last-write-wins. Because every counter now lives in one row, that check also serialises edits to *different* counters of the same client.
 
 ## Key flows
 
@@ -126,7 +127,7 @@ sequenceDiagram
 
 ### Save (overwrite semantics)
 
-Streamlit → `POST /api/v1/save` → `HistoryManager.save()` first **deletes** any existing rows for the same `(client_name, service_date)` (and `(client_name, week_start)` for `week_signatures`), then inserts the new rows. Re-saving a week therefore replaces the prior plan instead of accumulating. Color suffixes (`(R)`, `(Y)`, …) are stripped before persistence so cooldown matching is color-agnostic. UNIQUE indexes on `(client_name, service_date, slot, item_base)` and `(client_name, week_start, week_signature)` are the safety net against double-insert under a retried `/save`.
+Streamlit → `POST /api/v1/save` → `HistoryManager.save()` reads the existing `menu_history` rows for the requested `(client_name, service_date)` pairs, replaces just the saving counter's entry inside each day's `menu` jsonb, and upserts on the `(client_name, service_date)` primary key. Re-saving a week therefore replaces the prior plan for that serving line while the other lines' menus for those days survive. `week_signatures` rows are stamped `counter=<name>|…` and the week's rows for this counter (plus any prefix-less legacy row) are deleted before the new one is inserted, so a multi-counter client keeps one signature per line per week. Color suffixes (`(R)`, `(Y)`, …) are stripped before persistence so cooldown matching is color-agnostic.
 
 ### Pre-flight rule diagnostics
 
@@ -153,16 +154,25 @@ Streamlit → `POST /api/v1/regenerate` → `MenuRegenerator` locks every cell n
 
 Two SQL files live under `scripts/`:
 
-- `create_tables.sql` defines configuration tables (`clients`,
-  `menu_categories`, `slot_count_overrides`, `theme_overrides`,
-  `app_settings`) and their RLS policies.
-- `create_history_tables.sql` defines `menu_history` and
-  `week_signatures` (with FK + UNIQUE INDEX safety nets) and their RLS
+- `create_tables.sql` defines `clients` (with `counters`, `city`,
+  `serve_weekends`, `item_cooldown_days`, `source_pools`, `version`) and
+  `app_settings`, plus their RLS policies and baseline settings rows.
+- `create_history_tables.sql` defines `menu_history` (one jsonb row per
+  client-day) and `week_signatures`, with FK + index safety nets and RLS
   policies.
-- `create_users_table.sql` defines the `users` table for auth.
+- `migrate_to_counters.sql` upgrades a pre-counters database: it folds
+  `menu_categories` / `slot_count_overrides` / `theme_overrides` into
+  `clients.counters`, rolls long-form `menu_history` rows into one jsonb
+  per client-day, and stamps existing week signatures with the default
+  counter prefix. Old tables are left in place for verification; the
+  DROPs are at the bottom of the file, to run by hand.
+- `create_users_table.sql` defines the `users` table for auth. Only
+  needed if the auth layer is wired back into `api/app.py` — the current
+  build has no login path.
 
 Run order: `create_tables.sql` → `create_history_tables.sql` →
-`create_users_table.sql`. All three are idempotent — re-running them
-is a no-op once the schema is in place. See `docs/REVIEW.md` for the
-history of the schema-duplication fix that consolidated the
-`menu_history` / `week_signatures` DDL into a single file.
+`migrate_to_counters.sql` (upgrades only). All are idempotent —
+re-running them is a no-op once the schema is in place. See
+`docs/REVIEW.md` for the history of the schema-duplication fix that
+consolidated the `menu_history` / `week_signatures` DDL into a single
+file.

@@ -1,12 +1,13 @@
 """
-Theme Editor -- Customize day-wise menu theme per client.
+Theme Editor -- Customize day-wise menu theme per counter.
 
-Global defaults: Mon=Mix, Tue=Chinese, Wed=Biryani, Thu=South, Fri=North.
-Each client can override any day to any of the 5 themes.
+Global defaults: Mon=Mix, Tue=Chinese, Wed=Biryani, Thu=South, Fri=North
+(plus Sat=South, Sun=North for clients that serve weekends). Each of a
+client's counters can override any day.
 """
 
 import streamlit as st
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ui.formatters import THEME_TAG_COLORS, THEME_ICONS
 
@@ -18,6 +19,7 @@ _THEME_DISPLAY = {
     'biryani': 'Biryani',
     'south': 'South Indian',
     'north': 'North Indian',
+    'chinese_continental': 'Chinese / Continental',
 }
 
 
@@ -26,21 +28,26 @@ def render_theme_editor(
     default_theme_map: Dict[str, str],
     available_themes: List[str],
     client_name: str = "",
+    days: Optional[List[str]] = None,
 ) -> Dict[str, str]:
-    """Render theme day editor. Returns updated theme_map dict."""
+    """Render theme day editor. Returns updated theme_map dict.
+
+    *days* is the list of days to show — Mon–Fri by default, extended with
+    Saturday/Sunday for clients that serve weekends.
+    """
 
     st.markdown(
         '<div class="section-card">'
         '<p class="section-title">Day Themes</p>'
         '<p class="section-desc">'
-        'Override the default cuisine theme for any weekday. '
-        'Other clients keep the global defaults.</p>',
+        'Override the default cuisine theme for any day on this counter. '
+        'Other counters and clients keep their own settings.</p>',
         unsafe_allow_html=True,
     )
 
     updated = {}
 
-    for day in _WEEKDAYS:
+    for day in (days or _WEEKDAYS):
         day_display = day.capitalize()
         current_val = current_theme_map.get(day, default_theme_map.get(day, 'mix'))
         default_val = default_theme_map.get(day, 'mix')

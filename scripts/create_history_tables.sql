@@ -4,25 +4,37 @@
 -- Re-running is idempotent (every CREATE/ALTER guards against duplication).
 -- =============================================================================
 
--- 1. Menu history — one row per (client, date, slot, item) served
+-- 1. Menu history — one row per (client, service date), with every
+--    counter's picks inside the ``menu`` jsonb:
+--
+--      {"version": 2,
+--       "counters": {"South Indian": {"bread": "akki_roti", …},
+--                    "North Indian": {"bread": "butter_naan", …}}}
+--
+--    Keeping the whole day in one row means saving one counter can never
+--    orphan another's picks, and "what did we serve on the 4th" is a
+--    single-row read.
 CREATE TABLE IF NOT EXISTS menu_history (
-    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     client_name  TEXT NOT NULL REFERENCES clients(name) ON DELETE CASCADE,
     service_date DATE NOT NULL,
-    slot         TEXT NOT NULL,
-    item_base    TEXT NOT NULL,
-    created_at   TIMESTAMPTZ DEFAULT now()
+    menu         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at   TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (client_name, service_date)
 );
 
--- Fast lookups: cooldown queries filter by client + date range
+ALTER TABLE menu_history ADD COLUMN IF NOT EXISTS menu JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- Fast lookups: cooldown queries filter by client + date range. The PK
+-- already covers (client_name, service_date) ascending; this adds the
+-- descending order the "most recent N days" scans want.
 CREATE INDEX IF NOT EXISTS idx_menu_history_client_date
     ON menu_history(client_name, service_date DESC);
 
--- Prevent exact duplicate entries
-CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_history_unique
-    ON menu_history(client_name, service_date, slot, item_base);
-
--- 2. Week signatures — one row per saved week plan
+-- 2. Week signatures — one row per saved (client, week, counter).
+--    ``week_signature`` is prefixed with ``counter=<name>|`` so a
+--    multi-counter client keeps one signature per serving line without a
+--    dedicated column; rows written before counters existed have no
+--    prefix and are treated as belonging to every counter.
 CREATE TABLE IF NOT EXISTS week_signatures (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     client_name     TEXT NOT NULL REFERENCES clients(name) ON DELETE CASCADE,

@@ -16,16 +16,31 @@ accept or supply it to correlate traces across logs.
 | GET    | `/health` | Liveness + readiness — see [health response](#health-response) |
 | GET    | `/metrics` | In-process counter snapshot (auth-gated) |
 | GET    | `/clients` | List client names |
+| GET    | `/client-counters/<name>` | List a client's counter (serving-line) names |
 | POST   | `/plan` | Generate a plan |
 | POST   | `/regenerate` | Regenerate selected cells |
-| POST   | `/save` | Persist plan to history (overwrites prior rows for the same `(client, dates)`) |
-| GET    | `/saved-plan` | Return the saved plan for `(client_name, start_date, num_days)` if one exists — used by Streamlit's Generate flow to replay saved menus deterministically |
+| POST   | `/save` | Persist plan to history (overwrites the prior menu for the same `(client, counter, dates)`) |
+| GET    | `/saved-plan` | Return the saved plan for `(client_name, counter, start_date, num_days)` if one exists — used by Streamlit's Generate flow to replay saved menus deterministically |
 | POST   | `/diagnose` | Run the pre-flight rule diagnostics without invoking the solver (replaces the old `/validate-pools` surface) |
 | GET    | `/editor-metadata` | Slot / theme metadata for the editor UI |
-| GET    | `/client-config/<name>` | Read a client's config (returns `ETag: "<version>"`) |
-| PUT    | `/client-config/<name>` | Update a client's config (requires `version` body field or `If-Match` header) |
-| POST   | `/client` | Create a client |
+| GET    | `/client-config/<name>` | Read a client's config, all counters included (returns `ETag: "<version>"`) |
+| PUT    | `/client-config/<name>` | Update a client's config or one of its counters (requires `version` body field or `If-Match` header) |
+| POST   | `/client` | Create a client with its first counter |
 | DELETE | `/client/<name>` | Delete a client |
+
+### Counters
+
+A client has one or more **counters** — separate serving lines, each with
+its own slot list, per-slot counts, and day themes. `/plan`,
+`/regenerate`, `/save`, `/diagnose`, and `/saved-plan` all accept an
+optional `counter` (alias: `counter_name`) and default to the client's
+first counter, so single-counter callers can ignore the concept
+entirely. Naming a counter the client doesn't have is a 400 (404 on the
+config read) listing the names that do exist — never a silent fallback,
+which would quietly plan the wrong menu.
+
+Everything downstream of the request — pools, rules, diagnostics,
+cooldowns, saved history — is scoped to the one counter being planned.
 
 ---
 
@@ -221,12 +236,25 @@ surface is fully subsumed by `/diagnose`.
 ## Save semantics
 
 `POST /api/v1/save` writes **overwrite** to `menu_history` and
-`week_signatures`: any rows previously stored for the same
-`(client_name, service_date)` (and `(client_name, week_start)` for
-signatures) are deleted before the new rows are inserted. Re-saving the
-same week therefore replaces the prior plan instead of accumulating.
+`week_signatures`, scoped to the counter being saved:
+
+* `menu_history` holds one row per `(client_name, service_date)` with
+  every counter's picks nested under `menu.counters`. Saving one counter
+  reads the day's row, replaces that counter's entry, and upserts — so
+  re-saving replaces the prior plan for that line while the other lines'
+  menus survive untouched.
+* `week_signatures` rows are stamped with a `counter=<name>|` prefix.
+  Saving deletes the week's rows for this counter (plus any prefix-less
+  legacy row) before inserting, so a multi-counter client keeps exactly
+  one signature per line per week.
+
 This is what makes the Generate → load-from-history flow deterministic:
 the latest save is always the canonical answer.
+
+The read-merge-upsert is not transactional. Two admins saving *different
+counters for the same day* at the same instant can have one overwrite the
+other; the window is milliseconds and the loser just clicks Save again,
+which beats requiring a transactional RPC against Supabase.
 
 The single-shot retry policy in `MenuApiClient.save()` is unchanged —
 even though server-side `/save` is now idempotent on retry, a popped
@@ -246,6 +274,24 @@ PUT  /api/v1/client-config/<name>      body {"version": 3, "theme_map": {...}}
 
 Either include `"version": N` in the body (preferred by the Streamlit UI)
 or send `If-Match: "N"` as a header — standard HTTP conditional-update idiom.
+
+The version is bumped *after* the body is validated, so a rejected
+payload (say a negative `item_cooldown_days`) doesn't consume a version
+and force a spurious 409 on the admin's next, valid save.
+
+### PUT body keys
+
+| Key | Effect |
+|---|---|
+| `counter` | Which serving line the slot/theme keys apply to (default: first) |
+| `active_base_slots`, `slot_counts`, `theme_map` | That counter's menu shape |
+| `new_counter_name` | Rename the selected counter |
+| `create_counter: true` | Allow `counter` to name a line that doesn't exist yet |
+| `delete_counter` | Remove the named counter (the last one can't be deleted) |
+| `city`, `serve_weekends`, `item_cooldown_days`, `source_pools` | Client-level settings |
+
+Only the keys present are touched, so a theme-only save can't reset a
+client's city to empty.
 
 ---
 
@@ -317,32 +363,106 @@ that failed and skipped — the solver never sees them.
 
 | Table | Columns | Purpose |
 |---|---|---|
-| `clients` | `name (pk)`, `menu_category`, `version`, `created_at` | Client registry (version = optimistic-concurrency counter) |
-| `menu_categories` | `name (pk)`, `slots (text[])` | Base-slot templates |
-| `slot_count_overrides` | `client_name`, `slot`, `count` | e.g. `veg_dry = 2` |
-| `theme_overrides` | `client_name`, `day`, `theme` | Per-day theme override |
-| `app_settings` | `key`, `value` | Misc tunables |
-| `users` | `email (pk)`, `profile_name`, `password_hash`, `role` | Auth (bcrypt + legacy SHA-256 fallback) |
-| `menu_history` | `service_date`, `slot`, `item_base`, `client_name` | Item-level history |
-| `week_signatures` | `week_start`, `week_signature`, `client_name` | Week-level hash |
+| `clients` | `name (pk)`, `counters (jsonb)`, `city`, `serve_weekends`, `item_cooldown_days`, `source_pools (jsonb)`, `version`, `created_at` | Client registry — serving lines and settings inline (version = optimistic-concurrency counter) |
+| `app_settings` | `key`, `value` | Misc tunables (`constant_slots`, `core_min_one_slots`) |
+| `menu_history` | `client_name`, `service_date` (composite pk), `menu (jsonb)`, `created_at` | One row per client-day; every counter's picks nested inside `menu` |
+| `week_signatures` | `id (pk)`, `client_name`, `week_start`, `week_signature`, `created_at` | Week-level hash, one per counter (see prefix below) |
+
+`clients.counters` is an array of serving lines:
+
+```json
+[{"name":        "South Indian",
+  "categories":  ["bread", "rice", "veg_dry", "sambar", "papad"],
+  "slot_counts": {"veg_dry": 2},
+  "theme_map":   {"monday": "south", "tuesday": "south"}}]
+```
+
+`menu_history.menu` nests each counter's picks for the day:
+
+```json
+{"version": 2,
+ "counters": {"South Indian": {"bread": "akki_roti", "rice": "bisi_bele_bhat"},
+              "North Indian": {"bread": "butter_naan", "rice": "jeera_rice"}}}
+```
+
+A bare `{slot: item}` map is also accepted on read and treated as the
+default counter (`Counter 1`), so hand-written and pre-migration rows
+still load.
+
+`week_signatures.week_signature` carries a `counter=<name>|` prefix ahead
+of the signature body. The signature parser skips any leading non-date
+token, so the prefix needs no schema change; prefix-less rows predate
+counters and apply to every counter.
+
+Deployments upgrading from the pre-counters schema (`menu_category`,
+`menu_categories`, `slot_count_overrides`, `theme_overrides`, long-form
+`menu_history`) run `scripts/migrate_to_counters.sql`. `/health` reports
+`schema.status = "drift_detected"` with the missing columns named until
+the migration lands.
+
+> The `users` table and `scripts/create_users_table.sql` are only needed
+> if the authentication layer is wired back into `api/app.py` — the
+> current build has no login path, so a database without `users` is
+> expected.
 
 ### Slot expansion
 
 Base slot names (e.g. `veg_dry`) get expanded to indexed slot ids (`veg_dry__1`,
-`veg_dry__2`) based on `slot_count_overrides`. Rules operate on the expanded
-ids; `_base_slot()` strips the suffix when needed.
+`veg_dry__2`) based on the counter's `slot_counts`. Rules operate on the
+expanded ids; `_base_slot()` strips the suffix when needed. Slots a
+counter doesn't serve are stored as count `0` and drop out of expansion.
+
+### Combined and carved-out slots
+
+| Slot | Backed by |
+|---|---|
+| `dal_sambar` | union of the `dal` and `sambar` pools |
+| `sambar_rasam` | union of the `sambar` and `rasam` pools |
+| `curd` | `curd_side` items flagged `is_plain_curd` |
+| `curd_rice` | `rice` items flagged `is_curd_rice` |
+
+These are opt-in per counter, so an ontology that can't fill one only
+warns at pool-build time; a counter that *does* declare it gets a
+pre-flight diagnostic instead.
+
+### Source pools
+
+`clients.source_pools` names extra item collections a client may draw
+from, matched against the ontology's optional `source_pool` column. Items
+with no value (or `common` / `shared` / `default` / `base` / `all` /
+`core`) are the shared ontology and always in scope. An ontology with no
+`source_pool` column is treated as entirely shared — filtering is skipped
+rather than emptying every pool the moment someone sets the field.
 
 ### Default theme schedule
 
-| Weekday | Theme |
+| Day | Theme |
 |---|---|
 | Monday | Mix (south + north) |
 | Tuesday | Chinese |
 | Wednesday | Biryani |
 | Thursday | South Indian |
 | Friday | North Indian |
+| Saturday | South Indian |
+| Sunday | North Indian |
 
-Overridable per client via `theme_overrides`.
+Each counter's `theme_map` overrides this per day; days it omits fall back
+to the table above. Saturday/Sunday only apply when the client has
+`serve_weekends = true`, which also makes weekends count as service days
+in `/plan`'s date walk.
+
+`chinese_continental` is accepted as a theme name and canonicalised to
+`chinese` before it reaches the pool filters — the filters only compare
+against `mix` / `chinese` / `biryani` / `south` / `north`.
+
+### Item cooldown
+
+`clients.item_cooldown_days` (default 20 when NULL) drives the
+`item_cooldown` rule, the ban set handed to the solver, and the history
+lookback window. Cooldowns are computed **per counter**: a dish served on
+one line doesn't block another, or a client running three lines that each
+serve bread daily would burn through the bread pool three times as fast
+and go infeasible.
 
 ---
 
