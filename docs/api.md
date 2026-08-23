@@ -425,13 +425,24 @@ that failed and skipped — the solver never sees them.
 ### Plate weight
 
 `plate_weight` governs what one person is served in one day. The cap is
-per day, resolved by `src.constants.plate_cap_grams(day_type, slot_count)`:
+per day, resolved by `src.constants.plate_cap_grams(day_type, slot_count)`
+as a **theme base plus a width allowance** — every plate is capped, no day
+is unlimited:
 
-| Condition | Cap |
-|---|---|
-| More than 15 items on the plate | none — a counter serving eighteen lines can't fit the same total as one serving eleven |
-| Biryani day | **1100 g** — a 300 g biryani rice plus a 300 g non-veg biryani is genuinely a heavier meal |
-| Everything else | **1000 g** |
+| Slots on the plate | Ordinary day | Biryani day |
+|---|---|---|
+| Up to 15 | **1000 g** | **1200 g** |
+| 16 – 17 | 1050 g | 1250 g |
+| 18 or more | 1100 g | 1300 g |
+
+The base comes from `PLATE_CAP_GRAMS` (1000 g) and
+`PLATE_CAP_GRAMS_BY_THEME` (`biryani: 1200` — a 300 g biryani rice plus a
+300 g non-veg biryani is genuinely a heavier meal). The extra comes from
+`plate_wide_allowance_grams(slot_count)`, which is 0 up to
+`PLATE_CAP_SLOT_EXEMPTION` (15) slots and then follows
+`PLATE_WIDE_ALLOWANCE_GRAMS` — a counter serving eighteen lines cannot fit
+the same total as one serving eleven, but it does not get a blank cheque
+either. The two are **additive**: a wide biryani day gets both.
 
 The rule config takes no `max_kg` normally; setting one overrides the
 whole policy with a single ceiling on every day:
@@ -486,8 +497,80 @@ item carries `portion_trimmed_g`.
 
 With the current ontology and a standard 11-category counter (15 items on
 the plate): mix, chinese, south and north days come in at 920–980 g by
-item choice alone, and a biryani day is trimmed 180–200 g to land on
-1100 g.
+item choice alone, and a biryani day — whose lightest possible plate is
+1280 g — is trimmed ~100 g to land on its 1200 g cap.
+
+## Cost model (costing panel)
+
+"Overall Estimated Cost" opens two independent tabs off one shared number:
+the average plate food cost of the generated plan.
+
+### Vendor Cost — `src.cost.vendor_cost`
+
+The average plate food cost is only a share of what the operation costs to
+run, so it is scaled up to a fully-loaded **overall cost per plate**:
+
+```
+overall_per_plate = avg_food_cost / (food_cost_pct / 100)
+```
+
+The plate is then divided into shares that must add to 100%:
+
+| Share | Default | Set by |
+|---|---|---|
+| Food cost | 45% | input (the scaling anchor) |
+| Operating lines (manpower, electricity & water, consumables, transport, admin, depreciation) | 45% total | inputs, `VENDOR_COST_LINES` |
+| **Vendor profit** | **8%** (`DEFAULT_VENDOR_PROFIT_PCT`) | input |
+| **SmartQ share** | 2% at the defaults | **the remainder** |
+
+Vendor profit is an *input*, not what happens to be left over: a vendor
+negotiates a margin rather than accepting a residue. What remains after
+the food cost, the operating lines and that margin is SmartQ's share,
+computed by `smartq_share_pct()`.
+
+`share_status()` reads the remainder: negative means the shares
+over-allocate the plate (an error, with the real total named so the fix is
+obvious), exactly zero is a warning, anything positive is fine.
+`profit_status()` separately judges the *input* against a 5–10% band — a
+different kind of problem, so it is only shown when it has something to
+say.
+
+Every line is edited as a percentage or as rupees; the percentage is the
+source of truth and `on_change` callbacks keep the partner field in step.
+
+### SmartQ Costing — `src.cost.smartq_cost`
+
+```
+selling_price  = overall_per_plate * (1 + markup_pct / 100)   # markup defaults to 30%
+buying_amount  = overall_per_plate * pax * days
+selling_amount = selling_price     * pax * days
+```
+
+The selling price is set **either way round** — as `markup_pct` or as the
+price per plate — because a deal is usually discussed as a round number
+per head. `markup_pct_from_price()` inverts the markup, and the two
+inputs are kept in step by the same callback pattern. A price below the
+overall cost is allowed (bids happen): the markup goes negative, floored
+at `MIN_MARKUP_PCT` (-100%, a free plate), and the tab warns that the plan
+sells at a loss.
+
+Each operating line is a share of the selling amount; the yearly Food
+Licenses line is divided by `MONTHS_PER_YEAR` so its monthly equivalent
+sits alongside the rest when they are summed into the SmartQ cost.
+
+Profit picks up SmartQ's share of the plate from the vendor tab
+(`vc_smartq_share_pct`, turned into money by `share_amount()`):
+
+```
+smartq_profit = selling_amount - buying_amount - smartq_cost + vendor_share
+```
+
+That share is a **margin, not a cost reduction**, so it is credited to
+profit and shown as its own "Vendor Share Credit" metric. It is not extra
+money appearing from nowhere: crediting the share to profit is
+arithmetically identical to buying at `overall - share`, which is what the
+vendor tab says actually happens. The two tabs render in one script run
+(vendor first), so the hand-off is always a fresh figure.
 
 ## Data model
 

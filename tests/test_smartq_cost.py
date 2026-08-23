@@ -5,11 +5,13 @@ import pytest
 from src.cost.smartq_cost import (
     DEFAULT_SELLING_PAX,
     DEFAULT_WORKING_DAYS,
+    MIN_MARKUP_PCT,
     MONTHS_PER_YEAR,
     SMARTQ_COST_LINES,
     buying_amount,
     line_abs,
     line_pct,
+    markup_pct_from_price,
     selling_amount,
     selling_price,
     smartq_cost,
@@ -119,3 +121,131 @@ def test_all_non_food_lines_are_monthly():
             continue
         assert cadence == "monthly"
         assert divisor == 1
+
+# ---------------------------------------------------------------------------
+# Configurable markup and its inverse
+# ---------------------------------------------------------------------------
+
+class TestSellingMarkup:
+    def test_default_markup_is_30_percent(self):
+        from src.cost.smartq_cost import DEFAULT_SELLING_MARKUP_PCT
+
+        assert DEFAULT_SELLING_MARKUP_PCT == 30.0
+        assert selling_price(100.0) == pytest.approx(130.0)
+
+    @pytest.mark.parametrize("markup,expected", [
+        (0.0, 100.0), (25.0, 125.0), (30.0, 130.0), (55.5, 155.5),
+    ])
+    def test_markup_is_applied(self, markup, expected):
+        assert selling_price(100.0, markup) == pytest.approx(expected)
+
+    def test_price_and_markup_round_trip(self):
+        from src.cost.smartq_cost import markup_pct_from_price
+
+        overall = 247.04
+        for markup in (0.0, 12.5, 30.0, 47.3):
+            price = selling_price(overall, markup)
+            assert markup_pct_from_price(price, overall) == pytest.approx(markup)
+
+    def test_a_price_below_cost_implies_a_negative_markup(self):
+        """Selling under cost is a real (bad) scenario, not an error to
+        swallow — the number has to stay honest."""
+        from src.cost.smartq_cost import markup_pct_from_price
+
+        assert markup_pct_from_price(90.0, 100.0) == pytest.approx(-10.0)
+
+    def test_no_overall_cost_gives_a_zero_markup(self):
+        """Before a plan is costed there is nothing to mark up; the UI
+        needs a finite number rather than a division by zero."""
+        from src.cost.smartq_cost import markup_pct_from_price
+
+        assert markup_pct_from_price(150.0, 0.0) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# The vendor's leftover share, credited to profit
+# ---------------------------------------------------------------------------
+
+class TestVendorShareCredit:
+    def test_share_is_added_to_profit(self):
+        without = smartq_profit(1000.0, 700.0, 100.0)
+        with_share = smartq_profit(1000.0, 700.0, 100.0, vendor_share=50.0)
+        assert without == 200.0
+        assert with_share == 250.0
+
+    def test_share_defaults_to_nothing(self):
+        assert smartq_profit(1000.0, 700.0, 100.0) == 200.0
+
+    def test_crediting_the_share_equals_buying_cheaper(self):
+        """The credit is presentation, not extra money: adding it to
+        profit is the same arithmetic as buying at (overall - share)."""
+        credited = smartq_profit(1000.0, 700.0, 100.0, vendor_share=30.0)
+        bought_cheaper = smartq_profit(1000.0, 670.0, 100.0)
+        assert credited == bought_cheaper
+
+    def test_the_share_does_not_touch_the_cost_lines(self):
+        """It is a margin, so it must not inflate SmartQ's cost total."""
+        lines = [10.0, 20.0, 30.0]
+        assert smartq_cost(lines) == 60.0
+
+    def test_a_negative_share_reduces_profit(self):
+        """An over-allocated plate means SmartQ is short, and the profit
+        must show it rather than clamping at zero."""
+        assert smartq_profit(1000.0, 700.0, 100.0, vendor_share=-50.0) == 150.0
+
+    def test_end_to_end_with_the_defaults(self):
+        """The whole chain on realistic numbers, so a change to any one
+        constant that breaks the arithmetic shows up here."""
+        from src.cost.vendor_cost import (
+            DEFAULT_VENDOR_PROFIT_PCT, VENDOR_COST_LINES, share_amount,
+            smartq_share_pct,
+        )
+
+        overall, pax, days = 247.04, 150, 22
+        price = selling_price(overall)                       # 30% markup
+        sell = selling_amount(price, pax, days)
+        buy = buying_amount(overall, pax, days)
+        cost = smartq_cost(
+            line_abs(d, sell, div)
+            for _k, _l, d, _c, div in SMARTQ_COST_LINES
+        )
+        share_pct = smartq_share_pct(
+            45.0, {k: d for k, _l, d in VENDOR_COST_LINES},
+            DEFAULT_VENDOR_PROFIT_PCT,
+        )
+        share = share_amount(share_pct, overall, pax, days)
+
+        assert share_pct == pytest.approx(2.0)
+        plain = smartq_profit(sell, buy, cost)
+        credited = smartq_profit(sell, buy, cost, share)
+        assert credited > plain
+        assert credited - plain == pytest.approx(share)
+        assert smartq_profit_pct(credited, sell) > 0
+
+
+class TestBelowCostPricing:
+    """A price under the fully-loaded cost is a real bid, not an error, and
+    the markup that comes back must stay inside the input's range."""
+
+    def test_a_price_below_cost_gives_a_negative_markup(self):
+        assert markup_pct_from_price(200.0, 250.0) == pytest.approx(-20.0)
+
+    def test_a_free_plate_is_minus_one_hundred(self):
+        assert markup_pct_from_price(0.0, 250.0) == pytest.approx(-100.0)
+
+    def test_the_markup_never_falls_below_the_input_floor(self):
+        """The UI's Markup % input is bounded at MIN_MARKUP_PCT; a value
+        under it would be rejected when written back into the widget."""
+        assert markup_pct_from_price(-500.0, 250.0) == MIN_MARKUP_PCT
+        assert MIN_MARKUP_PCT == -100.0
+
+    def test_a_negative_markup_round_trips_through_the_price(self):
+        price = selling_price(250.0, -20.0)
+        assert price == pytest.approx(200.0)
+        assert markup_pct_from_price(price, 250.0) == pytest.approx(-20.0)
+
+    def test_selling_below_cost_loses_money(self):
+        overall, pax, days = 250.0, 150, 22
+        sell = selling_amount(selling_price(overall, -20.0), pax, days)
+        buy = buying_amount(overall, pax, days)
+        assert smartq_profit(sell, buy, 0.0) < 0

@@ -26,7 +26,7 @@ class TestPlateCapPolicy:
         assert plate_cap_grams('south', 11) == PLATE_CAP_GRAMS
 
     def test_biryani_day_is_allowed_a_heavier_plate(self):
-        assert plate_cap_grams('biryani', 15) == 1100
+        assert plate_cap_grams('biryani', 15) == 1200
         assert plate_cap_grams('biryani', 15) > PLATE_CAP_GRAMS
 
     def test_extended_theme_names_resolve_to_their_solver_theme(self):
@@ -34,11 +34,27 @@ class TestPlateCapPolicy:
         # special cap, so it lands on the base one.
         assert plate_cap_grams('chinese_continental', 15) == PLATE_CAP_GRAMS
 
-    def test_a_plate_with_more_slots_is_uncapped(self):
-        assert plate_cap_grams('mix', PLATE_CAP_SLOT_EXEMPTION) is not None
-        assert plate_cap_grams('mix', PLATE_CAP_SLOT_EXEMPTION + 1) is None
-        # …including on a themed day.
-        assert plate_cap_grams('biryani', PLATE_CAP_SLOT_EXEMPTION + 4) is None
+    def test_a_wider_plate_earns_graduated_headroom(self):
+        """More lines legitimately means more food, but a 16-item plate
+        shouldn't get the same allowance as a 20-item one."""
+        assert plate_cap_grams('mix', 15) == 1000
+        assert plate_cap_grams('mix', 16) == 1050
+        assert plate_cap_grams('mix', 17) == 1050
+        assert plate_cap_grams('mix', 18) == 1100
+        assert plate_cap_grams('mix', 30) == 1100
+
+    def test_theme_and_width_allowances_add(self):
+        """A wide biryani counter has both reasons to weigh more. Adding
+        them is also the only way that day comes within reach: its
+        lightest plate is ~1660 g and max trim reaches ~1245 g."""
+        assert plate_cap_grams('biryani', 16) == 1250
+        assert plate_cap_grams('biryani', 19) == 1300
+
+    def test_every_plate_has_a_cap(self):
+        """No plate is exempt any more — width buys headroom, not amnesty."""
+        for slots in (1, 15, 16, 18, 40):
+            for theme in ('mix', 'biryani', 'chinese'):
+                assert plate_cap_grams(theme, slots) is not None
 
     def test_unknown_theme_falls_back_to_the_base_cap(self):
         assert plate_cap_grams('', 10) == PLATE_CAP_GRAMS
@@ -219,6 +235,7 @@ class TestEnrichmentApplIesTheTrim:
         items = {f'slot_{i}': f'item_{i}' for i in range(12)}
         lookup = _lookup(**{f'item_{i}': (10.0, 90) for i in range(12)})
 
+
         mix = enrich_solution_with_costs(
             _solution('mix', items), lookup, cap_fn=plate_cap_grams,
         )['2026-09-09']
@@ -228,20 +245,20 @@ class TestEnrichmentApplIesTheTrim:
 
         assert mix['day_qty_cap_g'] == 1000
         assert mix['day_qty_trimmed_g'] == 80
-        assert biryani['day_qty_cap_g'] == 1100
+        assert biryani['day_qty_cap_g'] == 1200
         assert biryani['day_qty_trimmed_g'] == 0
 
-    def test_a_wide_plate_is_left_uncapped(self):
-        items = {f'slot_{i}': f'item_{i}' for i in range(PLATE_CAP_SLOT_EXEMPTION + 1)}
-        lookup = _lookup(**{
-            f'item_{i}': (10.0, 200) for i in range(PLATE_CAP_SLOT_EXEMPTION + 1)
-        })
+    def test_a_wide_plate_gets_headroom_but_is_still_capped(self):
+        n = PLATE_CAP_SLOT_EXEMPTION + 1        # 16 items -> 1050 g
+        items = {f'slot_{i}': f'item_{i}' for i in range(n)}
+        lookup = _lookup(**{f'item_{i}': (10.0, 100) for i in range(n)})
         day = enrich_solution_with_costs(
             _solution('mix', items), lookup, cap_fn=plate_cap_grams,
         )['2026-09-09']
-        assert day['day_qty_cap_g'] is None
-        assert day['day_qty_trimmed_g'] == 0
-        assert day['day_qty_total_kg'] > 1.0
+        assert day['day_qty_cap_g'] == 1050
+        # 1600 g of food trimmed towards 1050, limited by the 25% floor.
+        assert day['day_qty_trimmed_g'] > 0
+        assert round(day['day_qty_total_kg'] * 1000) <= 1200
 
 
 # ---------------------------------------------------------------------------

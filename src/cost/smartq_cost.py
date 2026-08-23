@@ -3,14 +3,25 @@ SmartQ cost model.
 
 Builds on the shared overall cost per plate (see ``src.cost.overall_cost``):
 
-    selling_price  = overall_per_plate * 1.30          (30% above cost)
+    selling_price  = overall_per_plate * (1 + markup)  (markup defaults to 30%)
     buying_amount  = overall_per_plate * pax * days
     selling_amount = selling_price     * pax * days
+
+The markup is an input, and so is the selling price it produces — the two
+are two views of one number, so the UI keeps them in step. Quoting a
+round price per plate is often how a deal is actually discussed, and
+working back to the implied markup is more useful than forcing the
+operator to do that arithmetic.
 
 Each operating line is a share of the selling amount. Most are monthly and
 taken as-is; the yearly Food Licenses line is divided by 12 so its
 monthly-equivalent sits alongside the others when they're summed into the
 SmartQ cost.
+
+SmartQ's profit also picks up the share of the plate the vendor doesn't
+need (see ``src.cost.vendor_cost.smartq_share_pct``). That share is a
+margin, not an operating cost, so it is added to profit — equivalently,
+SmartQ buys at less than the full overall cost and keeps the difference.
 
 Pure module — no Streamlit, no I/O — so the arithmetic is unit-testable. The
 ``ui.smartq_cost`` layer renders it and wires up the percentage <-> rupee
@@ -19,8 +30,17 @@ inputs.
 
 from typing import Iterable, List, Tuple
 
-# Selling price is set 30% above the fully-loaded overall cost per plate.
-SELLING_PRICE_MARKUP = 0.30
+# Default markup over the fully-loaded overall cost per plate, in percent.
+DEFAULT_SELLING_MARKUP_PCT = 30.0
+
+# Kept as a fraction for callers that predate the configurable markup.
+SELLING_PRICE_MARKUP = DEFAULT_SELLING_MARKUP_PCT / 100.0
+
+# A markup can be negative — a bid below the fully-loaded cost is a real
+# (if unhappy) position, and the model should show the loss rather than
+# refuse the number. -100% is a free plate, which is the floor: below it
+# SmartQ would be paying people to eat.
+MIN_MARKUP_PCT = -100.0
 
 # Defaults for the operating inputs (a typical month).
 DEFAULT_WORKING_DAYS = 22
@@ -46,9 +66,25 @@ SMARTQ_COST_LINES: List[Tuple[str, str, float, str, int]] = [
 ]
 
 
-def selling_price(overall_per_plate: float) -> float:
-    """Selling price per plate — 30% above the overall cost per plate."""
-    return overall_per_plate * (1.0 + SELLING_PRICE_MARKUP)
+def selling_price(overall_per_plate: float,
+                  markup_pct: float = DEFAULT_SELLING_MARKUP_PCT) -> float:
+    """Selling price per plate — *markup_pct* above the overall cost."""
+    return overall_per_plate * (1.0 + markup_pct / 100.0)
+
+
+def markup_pct_from_price(price: float, overall_per_plate: float) -> float:
+    """The markup a given selling price implies — inverse of
+    :func:`selling_price`.
+
+    Returns ``0.0`` when there is no overall cost to mark up, so the UI
+    stays finite before a plan has been costed. A price below the overall
+    cost gives a negative markup — the loss is the answer, not an error —
+    floored at :data:`MIN_MARKUP_PCT` so the value stays inside the range
+    the markup input accepts.
+    """
+    if overall_per_plate <= 0:
+        return 0.0
+    return max(MIN_MARKUP_PCT, (price / overall_per_plate - 1.0) * 100.0)
 
 
 def buying_amount(overall_per_plate: float, selling_pax: float,
@@ -83,10 +119,19 @@ def smartq_cost(line_values: Iterable[float]) -> float:
 
 
 def smartq_profit(sell_amount: float, buy_amount: float,
-                  total_cost: float) -> float:
-    """Net SmartQ profit over the period: revenue, less the cost of the plates
-    bought from the vendor, less SmartQ's own operating cost."""
-    return round(sell_amount - buy_amount - total_cost, 2)
+                  total_cost: float, vendor_share: float = 0.0) -> float:
+    """Net SmartQ profit over the period.
+
+    Revenue, less the plates bought from the vendor, less SmartQ's own
+    operating cost, **plus** the share of the plate the vendor doesn't
+    need (:func:`src.cost.vendor_cost.share_amount`).
+
+    That last term is a credit rather than a cost reduction only in
+    presentation: ``buy_amount`` is quoted at the full overall cost, so
+    adding the share back is the same arithmetic as buying at
+    ``overall - share`` and says more plainly where the money came from.
+    """
+    return round(sell_amount - buy_amount - total_cost + vendor_share, 2)
 
 
 def smartq_profit_pct(profit: float, sell_amount: float) -> float:

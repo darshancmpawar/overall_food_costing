@@ -187,8 +187,9 @@ class TestPlateWeightConfig:
         assert rule.max_kg is None
         assert rule.max_grams is None
         assert rule.cap_for('mix', 15) == PLATE_CAP_GRAMS
-        assert rule.cap_for('biryani', 15) == 1100
-        assert rule.cap_for('mix', PLATE_CAP_SLOT_EXEMPTION + 1) is None
+        assert rule.cap_for('biryani', 15) == 1200
+        assert rule.cap_for('mix', PLATE_CAP_SLOT_EXEMPTION + 1) == 1050
+        assert rule.cap_for('biryani', 19) == 1300
 
     def test_explicit_max_kg_overrides_the_policy(self):
         """One ceiling on every day, whatever the theme or slot count."""
