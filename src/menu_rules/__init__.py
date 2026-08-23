@@ -22,6 +22,7 @@ from .unique_items_menu_rule import UniqueItemsMenuRule
 from .coupling_menu_rule import CouplingMenuRule
 from .curd_side_menu_rule import CurdSideMenuRule
 from .premium_menu_rule import PremiumMenuRule
+from .plate_weight_rule import PlateWeightMenuRule
 
 # Consolidated domain modules
 from .theme_rules import (
@@ -59,7 +60,7 @@ __all__ = [
     'run_diagnostics', 'summarize', 'has_blocking_errors',
     'pool_warnings_projection',
     'CuisineMenuRule', 'UniqueItemsMenuRule', 'CouplingMenuRule',
-    'CurdSideMenuRule', 'PremiumMenuRule',
+    'CurdSideMenuRule', 'PremiumMenuRule', 'PlateWeightMenuRule',
     # theme
     'ThemeDayMenuRule', 'ThemeSlotFilterRule',
     'ThemeStarterPreferenceRule', 'ThemeFallbackPenaltyRule',

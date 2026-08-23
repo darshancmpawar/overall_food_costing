@@ -43,6 +43,7 @@ class MenuRuleType(Enum):
     COUPLING = "coupling"
     CURD_SIDE = "curd_side"
     PREMIUM = "premium"
+    PLATE_WEIGHT = "plate_weight"
     WELCOME_DRINK_COLOR = "welcome_drink_color"
     # Cooldown / pre-filter rules
     ITEM_COOLDOWN = "item_cooldown"
@@ -159,6 +160,12 @@ class DiagnoseContext:
     skip_cells: Set[Tuple[dt.date, str]]                 # from per-client slot_day_restriction
     client_cfg: Any                                      # ClientConfig dataclass
     active_base_slots: Optional[List[str]] = None        # client's configured slots (excl. const)
+    # Every rule in play this request, so a diagnose() whose feasibility
+    # depends on another rule's pre-filtering can project it — the plate
+    # weight cap has to know that a biryani day forces a 300 g rice, for
+    # instance. Rules that don't need it ignore it; a rule must skip
+    # itself when applying the list.
+    rules: List["BaseMenuRule"] = field(default_factory=list)
 
 
 class BaseMenuRule(ABC):

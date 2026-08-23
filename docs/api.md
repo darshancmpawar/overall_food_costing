@@ -394,6 +394,7 @@ Per-client overrides live in `data/configs/client_rules.json`.
 | `coupling` | hard | Item dependencies (curry ↔ rice, etc.) |
 | `curd_side` | hard | Fill the curd-side slot |
 | `premium` | hard | Per-horizon min / max for premium items |
+| `plate_weight` | hard | Total serving weight of one day's plate ≤ `max_kg` — see [Plate weight](#plate-weight) |
 | `welcome_drink_color` | hard | Color variety for welcome drinks |
 | `theme_day` | hard | Monday mix (≥1 south + ≥1 north) |
 | `theme_slot_filter` | pre-filter | Narrow pools by day theme (chinese / biryani / south / north) |
@@ -420,6 +421,47 @@ Rule configs are validated at load time. Invalid configs (for example
 that failed and skipped — the solver never sees them.
 
 ---
+
+### Plate weight
+
+`plate_weight` caps what one person is served in one day:
+
+```json
+{ "name": "plate_max_1kg", "type": "plate_weight", "max_kg": 1.0 }
+```
+
+The cap covers every solver-chosen item **plus the constant
+accompaniments** (papad, pickle), whose combined weight arrives as
+`SolverConfig.const_slot_grams`. Counting them keeps the cap and the
+"Qty / Plate" figure the UI shows measuring the same plate — a cap that
+ignored them would let the visible total sit above the limit.
+
+Its `diagnose()` compares the cap against the lightest plate each *theme*
+can build, after projecting the other rules' pre-filters. That projection
+is the whole point: unfiltered, a rice pool starts at 80 g, but the theme
+filter narrows a Biryani Wednesday to biryanis whose lightest serving is
+300 g. Measuring the unfiltered pool would pass a plan the solver then
+fails on, with a generic "not enough unique items" message instead of the
+real reason. Because the lightest surviving item in each slot is a true
+lower bound, a bound above the cap is a guaranteed infeasibility and is
+reported as an `error`, so `/plan` returns 422 naming the theme, the
+floor, and how far over it is.
+
+**The cap interacts with portion sizes, so it is a business decision, not
+a default.** Against the current ontology and a standard 11-category
+counter:
+
+| Day theme | Lightest possible plate |
+|---|---|
+| Mix / South / North | 900 g |
+| Chinese | 1050 g |
+| Biryani | 1300 g |
+
+A Biryani day is 300 g of biryani rice plus 300 g of non-veg biryani
+before anything else is served, so a 1.00 kg cap is unsatisfiable on
+Chinese and Biryani days for that counter — the diagnostics say so
+explicitly. Either raise `max_kg` (≈1.35 kg clears every theme), trim
+categories, or reduce those serving weights.
 
 ## Data model
 
@@ -468,6 +510,33 @@ the migration lands.
 > if the authentication layer is wired back into `api/app.py` — the
 > current build has no login path, so a database without `users` is
 > expected.
+
+### Serving weights and costs
+
+`cost_per_kg` and `grammage_per_serving` in `data/raw/menu_items.xlsx`
+are **XLOOKUP formulas** against a separate "Menu List" workbook, so the
+values the app reads are Excel's cached results. Two consequences:
+
+- The file cannot be corrected in place. Rewriting it with openpyxl
+  either discards every cached value (leaving the app with formula
+  strings and no cost data at all) or replaces formulas with literals
+  that the next upstream refresh would undo.
+- Corrections therefore live in code, in
+  `src.constants.COURSE_SERVING_GRAMMAGE_KG`, applied by
+  `DataCleanser._apply_course_grammage()` so they survive a re-export.
+
+Currently one course is normalised: **bread → 60 g**. Upstream carried
+three conventions in the same column — 30–70 g for one piece (correct),
+1000 g on 18 chapatti rows (a unit slip; that alone outweighed the other
+fourteen categories put together and made the plate read 2.03 kg), and
+0 g on 2 continental loaves. The whole course is set to one serving
+weight rather than the outliers being patched individually.
+
+Note that this fixes the *weight* only. Several bread groups' `cost_per_kg`
+still looks like a per-piece figure rather than per-kg (chapattis at
+2.00, dosas at 9.00, against parathas at 80.00), which leaves a chapatti
+costing ₹0.12 a serving. That is an upstream data question, not something
+the app should guess at.
 
 ### Slot expansion
 

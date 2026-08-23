@@ -7,9 +7,21 @@ from src.menu_rules.base_menu_rule import BaseMenuRule, MenuRuleType
 
 class TestMenuRuleLoader:
     def test_load_from_json_file(self):
+        """Every rule in the shipped config loads.
+
+        Compared against the file's own length rather than a literal, so
+        adding a rule to the config doesn't fail this test for the wrong
+        reason — what matters is that none were silently dropped by
+        validation.
+        """
+        import json
+
+        with open('data/configs/indian_menu_rules.json') as fh:
+            declared = json.load(fh)['rules']
         loader = MenuRuleLoader('data/configs/indian_menu_rules.json')
         rules = loader.load_from_file()
-        assert len(rules) == 14
+        assert len(rules) == len(declared)
+        assert {r.name for r in rules} == {r['name'] for r in declared}
 
     def test_all_rules_are_base_menu_rule(self):
         loader = MenuRuleLoader('data/configs/indian_menu_rules.json')

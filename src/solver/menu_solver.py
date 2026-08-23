@@ -103,6 +103,11 @@ class SolverConfig:
     deterministic: bool = True
     # Per-client theme map (overrides global weekday_type)
     theme_map: Optional[Dict[str, str]] = None
+    # Combined serving weight (grams) of the constant slots the solver
+    # never models but that still land on the plate — papad, pickle and
+    # friends. PlateWeightMenuRule subtracts it from its cap so the cap
+    # and the UI's "Qty / Plate" total measure the same plate.
+    const_slot_grams: int = 0
 
 
 # ---------------------------------------------------------------------------

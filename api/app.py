@@ -50,8 +50,11 @@ configure_logging()
 validate_required_env()
 from src.preprocessor import ExcelReader, DataCleanser
 from src.preprocessor.pool_builder import PoolBuilder, _base_slot
+import pandas as pd
+
 from src.constants import (
-    ALL_DAY_NAMES, BASE_SLOT_NAMES, CONST_SLOTS, DEFAULT_COUNTER_NAME,
+    ALL_DAY_NAMES, BASE_SLOT_NAMES, CONST_SLOTS, CONSTANT_ITEMS,
+    DEFAULT_COUNTER_NAME, DEFAULT_COUNTER_SLOTS,
     DEFAULT_ITEM_COOLDOWN_DAYS, REPEATABLE_ITEM_BASES, REQUIRED_POOL_SLOTS,
     WEEKDAY_NAMES,
 )
@@ -475,6 +478,30 @@ def _client_base_slots(client_cfg):
     return result
 
 
+def _const_slot_grams(df, client_cfg) -> int:
+    """Serving weight (grams) of the constant slots this counter serves.
+
+    The solver never models them — papad, pickle and friends are stamped
+    onto every day after the solve — but they are on the plate, so the
+    plate-weight cap has to know about them. Items the ontology has no
+    weight for contribute nothing.
+    """
+    if 'grammage_per_serving' not in df.columns or 'item' not in df.columns:
+        return 0
+    served = {s for s in client_cfg.active_slots if s in CONST_SLOTS}
+    if not served:
+        return 0
+    wanted = {
+        str(CONSTANT_ITEMS[slot]).strip().lower()
+        for slot in served if slot in CONSTANT_ITEMS
+    }
+    if not wanted:
+        return 0
+    rows = df[df['item'].astype(str).str.strip().str.lower().isin(wanted)]
+    grams = pd.to_numeric(rows['grammage_per_serving'], errors='coerce').fillna(0) * 1000
+    return int(round(float(grams.sum())))
+
+
 def _build_solver_config(df, client_cfg, start_date, num_days, time_limit, weekday_dates):
     """Shared helper to build SolverConfig."""
     active_base = _client_base_slots(client_cfg)
@@ -487,6 +514,7 @@ def _build_solver_config(df, client_cfg, start_date, num_days, time_limit, weekd
         explicit_dates=weekday_dates,
         premium_flag_col='is_premium_veg' if 'is_premium_veg' in df.columns and int(df['is_premium_veg'].sum()) > 0 else None,
         theme_map=client_cfg.theme_map or None,
+        const_slot_grams=_const_slot_grams(df, client_cfg),
     )
 
 
@@ -678,6 +706,7 @@ def _build_diagnose_context(inputs: SolverInputs) -> DiagnoseContext:
         skip_cells=inputs.skip_cells,
         client_cfg=inputs.client_cfg,
         active_base_slots=active_base,
+        rules=list(inputs.rules),
     )
 
 
@@ -1245,9 +1274,11 @@ def editor_metadata():
             'base_slot_names': list(BASE_SLOT_NAMES),
             'const_slots': list(CONST_SLOTS),
             # Slots the ontology must be able to fill for any client.
-            # The Cost Estimator starts from these so a fresh setup
-            # can't open with niche opt-in slots whose pools are empty.
             'required_pool_slots': list(REQUIRED_POOL_SLOTS),
+            # What a new counter starts from — a realistic client shape
+            # that fits under the plate-weight cap, which the union of
+            # every fillable slot does not.
+            'default_counter_slots': list(DEFAULT_COUNTER_SLOTS),
             'default_theme_map': DEFAULT_THEME_MAP,
             'available_themes': AVAILABLE_THEMES,
             'weekday_names': list(WEEKDAY_NAMES),

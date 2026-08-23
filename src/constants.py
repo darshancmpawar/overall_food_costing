@@ -30,6 +30,18 @@ REQUIRED_POOL_SLOTS: List[str] = [
     'nonveg_main', 'curd_side', 'dessert',
 ]
 
+# The menu shape a new counter starts from: the most common stored
+# client's category set (bread, rice, two vegetables, dal + sambar +
+# rasam, curd side, dessert, salad, plus a non-veg main). Deliberately
+# not REQUIRED_POOL_SLOTS — that list is "everything the ontology can
+# always fill", which is more courses than any real client serves and
+# lands a plate at ~1.28 kg, over MAX_PLATE_WEIGHT_KG before a single
+# choice is made.
+DEFAULT_COUNTER_SLOTS: List[str] = [
+    'salad', 'bread', 'rice', 'veg_gravy', 'veg_dry', 'nonveg_main',
+    'dal', 'sambar', 'rasam', 'curd_side', 'dessert',
+]
+
 # Slots that draw from the union of two other pools. Clients that merge
 # two courses onto one serving line (e.g. "dal_sambar" — one ladle,
 # either dish) declare the combined slot in their counter's categories.
@@ -69,6 +81,35 @@ RICE_EXCLUDE_ITEMS: Set[str] = {
     'steam rice',
     'plain_rice', 'plain rice',
 }
+
+# ---------------------------------------------------------------------------
+# Serving weights
+# ---------------------------------------------------------------------------
+
+# Canonical serving weight (kg) for a whole course, applied by
+# ``DataCleanser`` regardless of what the ontology says.
+#
+# ``cost_per_kg`` and ``grammage_per_serving`` in menu_items.xlsx are
+# XLOOKUP formulas against a separate "Menu List" workbook, so the values
+# the app reads are Excel's cached results and the file cannot be
+# corrected in place — a re-export would reintroduce whatever upstream
+# holds. Corrections therefore live here, where they survive a refresh.
+#
+# bread: upstream carried three conventions — 30–70 g for one piece
+# (correct), 1000 g on 18 chapatti rows (a unit slip: a kilogram of
+# chapatti is not a serving, and it outweighed the other fourteen
+# categories combined), and 0 g on 2 continental loaves. One serving of
+# bread is 60 g, so the whole course is normalised to it rather than only
+# the outliers being patched — one convention is the point.
+COURSE_SERVING_GRAMMAGE_KG: Dict[str, float] = {
+    'bread': 0.06,
+}
+
+# A plate may not exceed this total serving weight. Enforced by
+# ``src.menu_rules.plate_weight_rule.PlateWeightMenuRule``; the rule's
+# JSON config can override it per deployment.
+MAX_PLATE_WEIGHT_KG = 1.0
+
 
 DISPLAY_SLOT_NAME: Dict[str, str] = {
     'rice': 'Flavor Rice',

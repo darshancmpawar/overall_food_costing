@@ -41,6 +41,11 @@
       ]
     },
     {
+      "name": "plate_max_1kg",
+      "type": "plate_weight",
+      "max_kg": 1.0
+    },
+    {
       "name": "premium_limits",
       "type": "premium",
       "max_per_day": 1,
