@@ -10,7 +10,11 @@ import datetime as dt
 import pandas as pd
 import pytest
 
-from src.constants import COURSE_SERVING_GRAMMAGE_KG, MAX_PLATE_WEIGHT_KG
+from src.constants import (
+    COURSE_SERVING_GRAMMAGE_KG,
+    PLATE_CAP_GRAMS,
+    PLATE_CAP_SLOT_EXEMPTION,
+)
 from src.menu_rules.base_menu_rule import DiagnoseContext, MenuRuleType
 from src.menu_rules.plate_weight_rule import PlateWeightMenuRule, _grams
 from src.preprocessor.data_cleanser import DataCleanser
@@ -139,15 +143,20 @@ class TestPlateWeightConstraint:
         assert totals is not None
         assert totals[0] <= 1300
 
-    def test_infeasible_when_even_the_lightest_plate_busts(self):
-        assert _solve([[900], [300]], max_kg=1.0) is None
+    def test_unreachable_day_is_left_unconstrained(self):
+        """The lightest plate here is 1200 g against a 1 kg cap. Blocking
+        it would fail the whole plan, so the day is left alone and its
+        portions are trimmed later instead — see test_plate_trim.py."""
+        totals = _solve([[900], [300]], max_kg=1.0)
+        assert totals == {0: 1200}
 
     def test_constant_accompaniments_count_against_the_cap(self):
         """Papad and pickle are on the plate even though the solver never
         picks them, so they eat into the budget."""
         assert _solve([[900], [80, 300]], max_kg=1.0, const_grams=0) == {0: 980}
-        # With 40 g of accompaniments, 900 + 80 + 40 = 1020 > 1000.
-        assert _solve([[900], [80, 300]], max_kg=1.0, const_grams=40) is None
+        # With 40 g of accompaniments, 900 + 80 + 40 = 1020 > 1000, so no
+        # choice fits and the day goes to the trimmer unconstrained.
+        assert _solve([[900], [80, 300]], max_kg=1.0, const_grams=40) is not None
 
     def test_cap_applies_per_day_not_across_the_plan(self):
         totals = _solve([[900], [80, 300]], max_kg=1.0, days=3)
@@ -158,15 +167,12 @@ class TestPlateWeightConstraint:
         totals = _solve([[0], [80]], max_kg=1.0)
         assert totals == {0: 80}
 
-    def test_cap_smaller_than_the_accompaniments_is_rejected(self):
-        model = cp_model.CpModel()
-        cells = [_Cell(0, [80], model, 'a')]
-        rule = PlateWeightMenuRule({'name': 'cap', 'max_kg': 0.01})
-        with pytest.raises(ValueError, match="leaves nothing"):
-            rule.apply(model, {}, None, {
-                'cells': cells, 'dates': [0],
-                'cfg': SolverConfig(const_slot_grams=20),
-            })
+    def test_cap_below_the_accompaniments_constrains_nothing(self):
+        """A cap smaller than the fixed accompaniments is a
+        misconfiguration, but it must not fail the solve — the day is
+        left unconstrained and trimming takes it as far as it can."""
+        totals = _solve([[80]], max_kg=0.01, const_grams=20)
+        assert totals == {0: 80}
 
     def test_no_cells_is_a_noop(self):
         rule = PlateWeightMenuRule({'name': 'cap'})
@@ -174,10 +180,23 @@ class TestPlateWeightConstraint:
 
 
 class TestPlateWeightConfig:
-    def test_defaults_to_the_shared_constant(self):
+    def test_no_max_kg_defers_to_the_per_day_policy(self):
+        """Without an explicit override the cap varies by day: 1 kg
+        normally, 1.1 kg on a biryani day, none past 15 slots."""
         rule = PlateWeightMenuRule({'name': 'cap'})
-        assert rule.max_kg == MAX_PLATE_WEIGHT_KG
-        assert rule.max_grams == int(MAX_PLATE_WEIGHT_KG * 1000)
+        assert rule.max_kg is None
+        assert rule.max_grams is None
+        assert rule.cap_for('mix', 15) == PLATE_CAP_GRAMS
+        assert rule.cap_for('biryani', 15) == 1100
+        assert rule.cap_for('mix', PLATE_CAP_SLOT_EXEMPTION + 1) is None
+
+    def test_explicit_max_kg_overrides_the_policy(self):
+        """One ceiling on every day, whatever the theme or slot count."""
+        rule = PlateWeightMenuRule({'name': 'cap', 'max_kg': 1.2})
+        assert rule.max_grams == 1200
+        assert rule.cap_for('mix', 15) == 1200
+        assert rule.cap_for('biryani', 15) == 1200
+        assert rule.cap_for('mix', PLATE_CAP_SLOT_EXEMPTION + 1) == 1200
 
     def test_rule_type(self):
         assert PlateWeightMenuRule({'name': 'c'}).rule_type is MenuRuleType.PLATE_WEIGHT
@@ -243,7 +262,10 @@ def _ctx(pools, day_types, *, const_grams=0, slot_counts=None, rules=None):
 
 
 class TestPlateWeightDiagnostics:
-    def test_errors_when_the_lightest_plate_busts_the_cap(self):
+    def test_warns_when_the_lightest_plate_busts_the_cap(self):
+        """A warning, not an error: the day still plans, with trimmed
+        portions. The operator needs to know which days and by how much,
+        not to be stopped."""
         rule = PlateWeightMenuRule({'name': 'cap', 'max_kg': 1.0})
         day = dt.date(2026, 9, 9)
         diags = rule.diagnose(_ctx(
@@ -251,12 +273,22 @@ class TestPlateWeightDiagnostics:
             {day: 'biryani'},
         ))
         assert len(diags) == 1
-        assert diags[0].severity.value == 'error'
+        assert diags[0].severity.value == 'warning'
         assert 'Biryani' in diags[0].message
         assert diags[0].affected['min_plate_grams'] == 1100
         assert diags[0].affected['over_by_grams'] == 100
-        # The suggestion names a cap that would actually work.
-        assert '1100' in diags[0].suggestion
+
+    def test_never_blocks_a_plan(self):
+        """No plate-weight diagnostic may be an error — the pre-flight
+        gate turns errors into a 422 and this rule always has a way
+        forward."""
+        rule = PlateWeightMenuRule({'name': 'cap', 'max_kg': 0.1})
+        diags = rule.diagnose(_ctx(
+            {'rice': _pool(300), 'veg_gravy': _pool(800)},
+            {dt.date(2026, 9, 9): 'biryani'},
+        ))
+        assert diags
+        assert all(d.severity.value != 'error' for d in diags)
 
     def test_silent_when_the_plate_fits(self):
         rule = PlateWeightMenuRule({'name': 'cap', 'max_kg': 1.0})
@@ -274,7 +306,7 @@ class TestPlateWeightDiagnostics:
             pools, {dt.date(2026, 9, 7): 'mix'}, const_grams=20,
         ))
         assert len(over) == 1
-        assert over[0].affected['const_slot_grams'] == 20
+        assert over[0].affected['min_plate_grams'] == 1010
 
     def test_slot_counts_multiply_the_floor(self):
         """A counter serving two veg dry carries two portions of it."""

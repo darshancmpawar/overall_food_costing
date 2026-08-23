@@ -29,7 +29,7 @@ from api.rate_limit import rate_limit
 from api import metrics
 
 from api.config import (
-    DEFAULT_EXCEL_PATH, MENU_RULES_CONFIG_PATH,
+    DEFAULT_EXCEL_PATH, DEFAULT_PRICE_LIST_PATH, MENU_RULES_CONFIG_PATH,
     API_HOST, API_PORT, DEBUG, APP_VERSION,
     MIN_NUM_DAYS, MAX_NUM_DAYS, MIN_TIME_LIMIT_SECONDS, MAX_TIME_LIMIT_SECONDS,
     validate_required_env, today_in_app_tz,
@@ -48,13 +48,13 @@ configure_logging()
 # opaque KeyError or Supabase auth error on the first request — which
 # happens in production long after the process looked healthy.
 validate_required_env()
-from src.preprocessor import ExcelReader, DataCleanser
+from src.preprocessor import apply_price_list, ExcelReader, DataCleanser
 from src.preprocessor.pool_builder import PoolBuilder, _base_slot
 import pandas as pd
 
 from src.constants import (
     ALL_DAY_NAMES, BASE_SLOT_NAMES, CONST_SLOTS, CONSTANT_ITEMS,
-    DEFAULT_COUNTER_NAME, DEFAULT_COUNTER_SLOTS,
+    DEFAULT_COUNTER_NAME, DEFAULT_COUNTER_SLOTS, plate_cap_grams,
     DEFAULT_ITEM_COOLDOWN_DAYS, REPEATABLE_ITEM_BASES, REQUIRED_POOL_SLOTS,
     WEEKDAY_NAMES,
 )
@@ -211,7 +211,12 @@ def _get_menu_data(source_pools=None):
             if _df is None:
                 reader = ExcelReader(DEFAULT_EXCEL_PATH)
                 raw_df = reader.read()
-                cleanser = DataCleanser(raw_df)
+                # Costs come from the Menu List workbook, not the
+                # ontology's cached formula results. Applied before the
+                # cleanser so its per-course serving-weight corrections
+                # have the final say.
+                priced_df = apply_price_list(raw_df, DEFAULT_PRICE_LIST_PATH)
+                cleanser = DataCleanser(priced_df)
                 _df = cleanser.clean()
             if _pools is None:
                 _pools = {}
@@ -478,6 +483,11 @@ def _client_base_slots(client_cfg):
     return result
 
 
+def _const_slot_count(client_cfg) -> int:
+    """How many constant slots this counter serves."""
+    return sum(1 for s in client_cfg.active_slots if s in CONST_SLOTS)
+
+
 def _const_slot_grams(df, client_cfg) -> int:
     """Serving weight (grams) of the constant slots this counter serves.
 
@@ -515,6 +525,7 @@ def _build_solver_config(df, client_cfg, start_date, num_days, time_limit, weekd
         premium_flag_col='is_premium_veg' if 'is_premium_veg' in df.columns and int(df['is_premium_veg'].sum()) > 0 else None,
         theme_map=client_cfg.theme_map or None,
         const_slot_grams=_const_slot_grams(df, client_cfg),
+        const_slot_count=_const_slot_count(client_cfg),
     )
 
 
@@ -835,13 +846,21 @@ def _plan_pipeline(inputs: SolverInputs, extra: Optional[Dict[str, Any]] = None)
 
 
 def _format_and_cost(inputs: SolverInputs, week_plan, plan_dates) -> Dict[str, Any]:
-    """Format a solved week and attach per-item / per-day cost fields."""
+    """Format a solved week, then cost it against the plate it will serve.
+
+    The plate-weight cap is applied here as well as in the solver: days
+    the solver could fit under the cap are already within it, and days it
+    could not have their portions trimmed now — before costs are
+    computed, so the money reflects the food actually served.
+    """
     from src.cost.calculator import enrich_solution_with_costs
 
     formatter = SolutionFormatter(
         week_plan, plan_dates, theme_map=inputs.client_cfg.theme_map or None,
     )
-    return enrich_solution_with_costs(formatter.to_dict(), _get_cost_lookup())
+    return enrich_solution_with_costs(
+        formatter.to_dict(), _get_cost_lookup(), cap_fn=plate_cap_grams,
+    )
 
 
 def _plan_endpoint(prepare, *, metric: str,
@@ -1749,7 +1768,7 @@ def health():
 @app.route('/')
 def root():
     return jsonify({
-        'name': 'Ikigai Masala Menu Planning API',
+        'name': 'Cost Estimator Menu Planning API',
         'version': APP_VERSION,
         'docs': '/api/v1/clients',
     })

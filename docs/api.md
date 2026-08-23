@@ -424,44 +424,70 @@ that failed and skipped — the solver never sees them.
 
 ### Plate weight
 
-`plate_weight` caps what one person is served in one day:
+`plate_weight` governs what one person is served in one day. The cap is
+per day, resolved by `src.constants.plate_cap_grams(day_type, slot_count)`:
+
+| Condition | Cap |
+|---|---|
+| More than 15 items on the plate | none — a counter serving eighteen lines can't fit the same total as one serving eleven |
+| Biryani day | **1100 g** — a 300 g biryani rice plus a 300 g non-veg biryani is genuinely a heavier meal |
+| Everything else | **1000 g** |
+
+The rule config takes no `max_kg` normally; setting one overrides the
+whole policy with a single ceiling on every day:
 
 ```json
-{ "name": "plate_max_1kg", "type": "plate_weight", "max_kg": 1.0 }
+{ "name": "plate_weight_cap", "type": "plate_weight" }
 ```
 
-The cap covers every solver-chosen item **plus the constant
-accompaniments** (papad, pickle), whose combined weight arrives as
-`SolverConfig.const_slot_grams`. Counting them keeps the cap and the
-"Qty / Plate" figure the UI shows measuring the same plate — a cap that
-ignored them would let the visible total sit above the limit.
+The cap counts every item served that day **including the constant
+accompaniments** (papad, pickle), which reach the solver as
+`SolverConfig.const_slot_grams` / `const_slot_count`. Counting them keeps
+the cap and the "Qty / Plate" figure the UI shows measuring the same
+plate.
 
-Its `diagnose()` compares the cap against the lightest plate each *theme*
-can build, after projecting the other rules' pre-filters. That projection
-is the whole point: unfiltered, a rice pool starts at 80 g, but the theme
-filter narrows a Biryani Wednesday to biryanis whose lightest serving is
-300 g. Measuring the unfiltered pool would pass a plan the solver then
-fails on, with a generic "not enough unique items" message instead of the
-real reason. Because the lightest surviving item in each slot is a true
-lower bound, a bound above the cap is a guaranteed infeasibility and is
-reported as an `error`, so `/plan` returns 422 naming the theme, the
-floor, and how far over it is.
+#### Fit first, trim second
 
-**The cap interacts with portion sizes, so it is a business decision, not
-a default.** Against the current ontology and a standard 11-category
-counter:
+The two halves are deliberately split, and nothing is ever blocked:
 
-| Day theme | Lightest possible plate |
-|---|---|
-| Mix / South / North | 900 g |
-| Chinese | 1050 g |
-| Biryani | 1300 g |
+1. **The solver fits the plate where it can.** `apply()` compares each
+   day's cap against the lightest plate its cells could build — the
+   minimum candidate in every cell, which is exact, post-filter. Where
+   that fits, a hard constraint goes on the day and the solver builds a
+   plate within the cap while obeying every other rule.
+2. **Portions are trimmed where it can't.** A day whose lightest plate
+   already exceeds its cap is left *unconstrained* — forcing it would
+   fail the whole plan — and
+   `src.cost.plate_adjust.trim_portions()` brings it down instead, during
+   cost enrichment so the money reflects the food actually served.
 
-A Biryani day is 300 g of biryani rice plus 300 g of non-veg biryani
-before anything else is served, so a 1.00 kg cap is unsatisfiable on
-Chinese and Biryani days for that counter — the diagnostics say so
-explicitly. Either raise `max_kg` (≈1.35 kg clears every theme), trim
-categories, or reduce those serving weights.
+Trimming is shaped by the rules in `src.constants`:
+
+- `PLATE_TRIM_STEP_GRAMS` (5 g) — kitchens serve round numbers.
+- Off the heaviest portion each time, which is what makes the result
+  balanced: two 300 g items shed weight together and stay level.
+- `PLATE_TRIM_MAX_CUT_FRACTION` (25%) — no portion loses more than a
+  quarter of itself, which forces a large trim to spread across several
+  items and guarantees none reaches zero.
+
+A day that can't reach its cap within those limits is trimmed as far as
+they allow and left slightly heavy, rather than having a portion pushed
+below its floor.
+
+`diagnose()` reports which *themes* will be trimmed and by how much, as a
+**warning** — never an error, since there is always a way forward. It
+measures after projecting the other rules' pre-filters, because those are
+what make a themed day heavy: unfiltered a rice pool starts at 80 g, but
+the theme filter narrows a Biryani Wednesday to biryanis starting at
+300 g.
+
+Per-day results carry `day_qty_cap_g` and `day_qty_trimmed_g`; a trimmed
+item carries `portion_trimmed_g`.
+
+With the current ontology and a standard 11-category counter (15 items on
+the plate): mix, chinese, south and north days come in at 920–980 g by
+item choice alone, and a biryani day is trimmed 180–200 g to land on
+1100 g.
 
 ## Data model
 
@@ -515,7 +541,18 @@ the migration lands.
 
 `cost_per_kg` and `grammage_per_serving` in `data/raw/menu_items.xlsx`
 are **XLOOKUP formulas** against a separate "Menu List" workbook, so the
-values the app reads are Excel's cached results. Two consequences:
+values the app reads are Excel's cached results — stale the moment prices
+move.
+
+That Menu List now ships as `data/raw/menu_prices.xlsx` and is read
+directly by `src.preprocessor.price_list.apply_price_list()`, which
+overrides both columns by normalised item name before cleansing. Costs
+therefore come from the source rather than a cache, and refreshing prices
+is a file drop. Items the list doesn't mention keep their cached values,
+so a partial list degrades instead of blanking out costing; a missing
+file logs a warning and changes nothing.
+
+Two consequences of the formulas remain:
 
 - The file cannot be corrected in place. Rewriting it with openpyxl
   either discards every cached value (leaving the app with formula
@@ -532,11 +569,10 @@ fourteen categories put together and made the plate read 2.03 kg), and
 0 g on 2 continental loaves. The whole course is set to one serving
 weight rather than the outliers being patched individually.
 
-Note that this fixes the *weight* only. Several bread groups' `cost_per_kg`
-still looks like a per-piece figure rather than per-kg (chapattis at
-2.00, dosas at 9.00, against parathas at 80.00), which leaves a chapatti
-costing ₹0.12 a serving. That is an upstream data question, not something
-the app should guess at.
+The Menu List carries believable bread prices (₹58–120/kg, so ₹3.48–7.20
+a serving at 60 g), but its bread *weights* are still mixed — chapattis
+at 350 g, one dosa at 800 g — which is why the normalisation stays in
+place on top of the import.
 
 ### Slot expansion
 

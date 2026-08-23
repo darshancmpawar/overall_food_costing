@@ -6,17 +6,30 @@ the solver has no reason to prefer a 120 g rice over a 300 g biryani in
 every slot at once, and the plate drifts into portions no one eats — and
 that nobody costed for.
 
+The cap is per day and comes from :func:`src.constants.plate_cap_grams`:
+1000 g normally, 1100 g on a biryani day (a 300 g rice plus a 300 g
+non-veg biryani is genuinely a heavier meal), and no cap at all once a
+plate carries more than fifteen items.
+
+Where the cap is reachable the constraint does the work — the solver
+builds a plate that fits while obeying every other rule. Where it isn't,
+the day is left unconstrained and its portions are trimmed instead, by
+:func:`src.cost.plate_adjust.trim_portions`. That split matters: forcing
+the constraint on an unreachable day would fail the whole plan, and
+trimming a day that could have fitted would shrink portions for no
+reason.
+
 CP-SAT phase rule. Weights are converted to whole grams because CP-SAT
 works in integers; a kilogram is 1000 g, so nothing is lost.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ortools.sat.python import cp_model
 
-from src.constants import BASE_SLOT_NAMES, MAX_PLATE_WEIGHT_KG
+from src.constants import BASE_SLOT_NAMES, plate_cap_grams
 from .base_menu_rule import (
     BaseMenuRule,
     Diagnostic,
@@ -80,11 +93,26 @@ class PlateWeightMenuRule(BaseMenuRule):
     def __init__(self, rule_config: Dict[str, Any]):
         super().__init__(rule_config)
         self.rule_type = MenuRuleType.PLATE_WEIGHT
-        self.max_kg = float(rule_config.get('max_kg', MAX_PLATE_WEIGHT_KG))
+        # An explicit max_kg overrides the whole policy — same ceiling on
+        # every day, however many slots. Left unset, per-day caps come
+        # from src.constants.plate_cap_grams.
+        self.max_kg = (
+            float(rule_config['max_kg']) if rule_config.get('max_kg') is not None
+            else None
+        )
 
     @property
-    def max_grams(self) -> int:
+    def max_grams(self) -> Optional[int]:
+        """The override cap in grams, or None when the policy applies."""
+        if self.max_kg is None:
+            return None
         return int(round(self.max_kg * _GRAMS_PER_KG))
+
+    def cap_for(self, day_type: str, slot_count: int) -> Optional[int]:
+        """Cap in grams for one plate — the override if set, else policy."""
+        if self.max_kg is not None:
+            return self.max_grams
+        return plate_cap_grams(day_type, slot_count)
 
     def validate_config(self) -> bool:
         return not self._collect_errors()
@@ -93,7 +121,7 @@ class PlateWeightMenuRule(BaseMenuRule):
         return self._collect_errors()
 
     def _collect_errors(self) -> List[str]:
-        if self.max_kg <= 0:
+        if self.max_kg is not None and self.max_kg <= 0:
             return [f"max_kg must be > 0 (got {self.max_kg})"]
         return []
 
@@ -111,31 +139,68 @@ class PlateWeightMenuRule(BaseMenuRule):
         cfg = context.get('cfg')
         return int(getattr(cfg, 'const_slot_grams', 0) or 0)
 
+    @staticmethod
+    def _const_slot_count(context: Dict[str, Any]) -> int:
+        """How many constant slots this counter serves.
+
+        They count towards the "more than fifteen items" exemption
+        because they are items on the plate, even though the solver
+        never chooses them.
+        """
+        cfg = context.get('cfg')
+        return int(getattr(cfg, 'const_slot_count', 0) or 0)
+
     def apply(self, model: cp_model.CpModel, variables: Dict[str, Any],
               menu_data: Any, context: Dict[str, Any]) -> None:
+        """Constrain each day's plate, but only where the cap is reachable.
+
+        The lightest candidate in every cell is the lightest plate the
+        solver could possibly build that day. If that already exceeds the
+        cap, constraining the day would make the whole plan infeasible —
+        so the day is skipped and left to portion trimming. Nothing is
+        ever blocked by this rule.
+        """
         cells = context.get('cells', [])
         dates = context.get('dates', [])
+        day_types = context.get('day_types', [])
         if not cells or not dates:
             return
 
-        budget = self.max_grams - self._const_grams(context)
-        if budget <= 0:
-            raise ValueError(
-                f"plate weight cap of {self.max_kg:.2f} kg leaves nothing for "
-                f"the menu once the constant accompaniments "
-                f"({self._const_grams(context)} g) are counted"
-            )
+        const_grams = self._const_grams(context)
+        const_slot_count = self._const_slot_count(context)
 
-        by_day: Dict[int, List] = {}
+        per_day: Dict[int, List] = {}
+        lightest: Dict[int, int] = {}
+        cell_count: Dict[int, int] = {}
         for cell in cells:
+            options = []
             for var, row in zip(cell.x_vars, cell.cand_rows):
                 grams = _grams(row.get('grammage_per_serving'))
                 if grams:
-                    by_day.setdefault(cell.d_idx, []).append(var * grams)
+                    options.append((var, grams))
+            cell_count[cell.d_idx] = cell_count.get(cell.d_idx, 0) + 1
+            if not options:
+                continue
+            per_day.setdefault(cell.d_idx, []).extend(
+                var * grams for var, grams in options
+            )
+            lightest[cell.d_idx] = lightest.get(cell.d_idx, 0) + min(
+                g for _v, g in options
+            )
 
-        for terms in by_day.values():
-            if terms:
-                model.Add(sum(terms) <= budget)
+        for d_idx, terms in per_day.items():
+            day_type = (
+                day_types[d_idx] if d_idx < len(day_types) else ''
+            )
+            slot_count = cell_count.get(d_idx, 0) + const_slot_count
+            cap = self.cap_for(day_type or '', slot_count)
+            if cap is None:
+                continue
+            budget = cap - const_grams
+            # Unreachable: leave the day alone so trimming can handle it.
+            if budget <= 0 or lightest.get(d_idx, 0) > budget:
+                continue
+            model.Add(sum(terms) <= budget)
 
     def _themed_floor(self, ctx: DiagnoseContext, date, day_type: str,
                       base_slots, slot_counts):
@@ -182,15 +247,18 @@ class PlateWeightMenuRule(BaseMenuRule):
         return total, breakdown
 
     def diagnose(self, ctx: DiagnoseContext) -> List[Diagnostic]:
-        """Check the cap against the lightest plate each day can build.
+        """Report which themes will need their portions trimmed.
 
-        The lightest surviving item in every slot is a true lower bound —
-        the solver cannot do better — so a bound above the cap is a
-        guaranteed infeasibility, reported as an ERROR before the solver
-        spends its budget. Reported per *theme* rather than per date:
-        every biryani Wednesday in a plan fails for the same reason, and
-        one message naming the theme is more useful than five naming
-        dates.
+        Nothing here blocks a plan: a day the solver can't fit under its
+        cap has its portions trimmed instead, so the worst case is
+        smaller servings rather than no menu. What the operator needs to
+        know is *which* days that happens on and by how much, since it
+        changes both the plate and its cost.
+
+        Measured after projecting the other rules' pre-filters, because
+        those are what make a themed day heavy — unfiltered, a rice pool
+        starts at 80 g, but the theme filter narrows a biryani Wednesday
+        to biryanis starting at 300 g.
         """
         diags: List[Diagnostic] = []
         base_slots = ctx.active_base_slots or list(BASE_SLOT_NAMES)
@@ -198,19 +266,26 @@ class PlateWeightMenuRule(BaseMenuRule):
             dict(getattr(ctx.client_cfg, 'slot_counts', {}) or {})
             if ctx.client_cfg is not None else {}
         )
-        cap = self.max_grams
+        const_slots = int(getattr(ctx.cfg, 'const_slot_count', 0) or 0)
 
-        seen_themes = {}
+        seen = {}
         for date in ctx.dates:
             day_type = ctx.day_types.get(date, '') or 'normal'
-            if day_type in seen_themes:
+            if day_type in seen:
                 continue
-            seen_themes[day_type] = (
-                date, *self._themed_floor(ctx, date, day_type, base_slots, slot_counts)
+            floor, breakdown = self._themed_floor(
+                ctx, date, day_type, base_slots, slot_counts,
             )
+            seen[day_type] = (date, floor, breakdown)
 
-        for day_type, (date, floor, breakdown) in sorted(seen_themes.items()):
-            if not breakdown or floor <= cap:
+        for day_type, (date, floor, breakdown) in sorted(seen.items()):
+            if not breakdown:
+                continue
+            served = sum(
+                int(slot_counts.get(b, 1) or 1) for b, _g in breakdown
+            ) + const_slots
+            cap = self.cap_for(day_type, served)
+            if cap is None or floor <= cap:
                 continue
             heaviest = ", ".join(
                 f"{b.replace('_', ' ')} {g} g"
@@ -220,18 +295,20 @@ class PlateWeightMenuRule(BaseMenuRule):
             diags.append(Diagnostic(
                 rule=self.name,
                 rule_type=self.rule_type.value,
-                severity=DiagnosticSeverity.ERROR,
+                severity=DiagnosticSeverity.WARNING,
                 phase=DiagnosticPhase.APPLY,
                 message=(
-                    f"{day_type.capitalize()} days can't meet the "
-                    f"{cap} g plate cap: the lightest plate these "
-                    f"{len(breakdown)} categories can build is {floor} g, "
-                    f"{over} g over. Heaviest: {heaviest}."
+                    f"{day_type.capitalize()} days can't fit the {cap} g "
+                    f"plate cap by choosing lighter items — the lightest "
+                    f"plate is {floor} g — so about {over} g will be "
+                    f"trimmed from the largest portions "
+                    f"(5 g at a time, no portion losing more than a "
+                    f"quarter). Heaviest: {heaviest}."
                 ),
                 suggestion=(
-                    f"Raise the cap to {(floor + 49) // 50 * 50} g, drop a "
-                    f"category from this counter, or reduce the serving "
-                    f"weight of the heaviest items above."
+                    "No action needed — the plan and its costs reflect the "
+                    "trimmed portions. Drop a category or raise the cap for "
+                    "this theme if you would rather keep full portions."
                 ),
                 affected={
                     'day_type': day_type,
@@ -239,9 +316,7 @@ class PlateWeightMenuRule(BaseMenuRule):
                     'min_plate_grams': floor,
                     'max_plate_grams': cap,
                     'over_by_grams': over,
-                    'const_slot_grams': int(
-                        getattr(ctx.cfg, 'const_slot_grams', 0) or 0
-                    ),
+                    'slots_on_plate': served,
                     'heaviest': [
                         {'slot': b, 'grams': g}
                         for b, g in sorted(breakdown, key=lambda x: -x[1])[:5]

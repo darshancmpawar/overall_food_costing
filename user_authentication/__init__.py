@@ -1,4 +1,4 @@
-"""User authentication and role-based access control for Ikigai Masala.
+"""User authentication and role-based access control for Cost Estimator.
 
 Submodules:
     models        — User dataclass, role constants

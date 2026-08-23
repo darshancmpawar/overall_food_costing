@@ -63,7 +63,7 @@ def render_login_form(api_base_url: str = "http://localhost:5000"):
         st.markdown(
             '<div class="login-brand">'
             '<div class="login-brand-icon">&#127835;</div>'
-            '<h1>Ikigai Masala</h1>'
+            '<h1>Cost Estimator</h1>'
             '<p>Sign in to your account</p>'
             '</div>',
             unsafe_allow_html=True,

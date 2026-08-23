@@ -1,5 +1,5 @@
 -- =============================================================================
--- Supabase schema for Ikigai Masala client configuration (counters revision)
+-- Supabase schema for Cost Estimator client configuration (counters revision)
 -- Run this in the Supabase SQL Editor (Dashboard > SQL Editor > New query).
 -- Re-running is idempotent.
 --

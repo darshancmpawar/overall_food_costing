@@ -238,7 +238,7 @@ verification code entirely.
 ## Project layout
 
 ```
-ikigai_masala-main/
+overall_food_costing/
 ├── app.py                    Streamlit entry (spawns Flask)
 ├── api/
 │   ├── app.py                Flask API + request tracing

@@ -232,7 +232,7 @@ class TestRootEndpoint:
         resp = client.get('/')
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data['name'] == 'Ikigai Masala Menu Planning API'
+        assert data['name'] == 'Cost Estimator Menu Planning API'
         assert 'version' in data
 
 

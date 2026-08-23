@@ -11,6 +11,9 @@ import os
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULT_EXCEL_PATH = os.path.join(_BASE_DIR, "data", "raw", "menu_items.xlsx")
+# The Menu List workbook the ontology's cost columns are XLOOKUP'd from.
+# Read directly so prices come from the source rather than Excel's cache.
+DEFAULT_PRICE_LIST_PATH = os.path.join(_BASE_DIR, "data", "raw", "menu_prices.xlsx")
 MENU_RULES_CONFIG_PATH = os.path.join(_BASE_DIR, "data", "configs", "indian_menu_rules.json")
 CLIENT_RULES_CONFIG_PATH = os.path.join(_BASE_DIR, "data", "configs", "client_rules.json")
 

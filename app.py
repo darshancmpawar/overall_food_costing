@@ -1,11 +1,10 @@
 """
-Streamlit frontend for Ikigai Masala Menu Planning.
+Streamlit frontend for the Cost Estimator menu planner.
 
 Single entry point - auto-starts the Flask API backend in a background thread.
 
 Run with:
-    cd ikigai_masala-main
-    streamlit run app.py
+        streamlit run app.py
 """
 
 import os
@@ -175,7 +174,7 @@ def _ensure_backend_running() -> str:
 # Page config — MUST be first Streamlit command
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Ikigai Masala - Menu Planner",
+    page_title="Cost Estimator - Menu Planner",
     page_icon="https://em-content.zobj.net/source/apple/391/curry-rice_1f35b.png",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -335,7 +334,7 @@ with st.sidebar:
         <div class="sidebar-brand-row">
             <div class="sidebar-brand-icon">&#127835;</div>
             <div>
-                <h2>Ikigai Masala</h2>
+                <h2>Cost Estimator</h2>
                 <p>Weekly Menu Planner</p>
             </div>
         </div>

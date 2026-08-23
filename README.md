@@ -1,4 +1,4 @@
-# Ikigai Masala
+# Cost Estimator
 
 Constraint-based weekly menu planner for corporate meal providers. Generates
 Indian menus that respect cuisine themes, item cooldowns, color variety,
@@ -26,6 +26,9 @@ The planner has two modes, switched in the sidebar:
 - **Backend:** Flask API (auto-started by Streamlit on port 5000)
 - **Solver:** Google OR-Tools CP-SAT
 - **Database:** Supabase (PostgreSQL) — clients, history, config
+- **Costing data:** `data/raw/menu_prices.xlsx` (the Menu List) is read
+  directly for per-kg cost and serving weight; drop in a new copy to
+  reprice everything.
 
 ---
 
@@ -47,7 +50,6 @@ Open `http://localhost:8501`, log in, pick a client, generate a plan.
 ## Quick start (local Python)
 
 ```bash
-cd ikigai_masala-main
 pip install -r requirements-dev.txt
 
 # one-time in the Supabase SQL editor:
