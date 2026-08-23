@@ -1,5 +1,5 @@
 -- =============================================================================
--- Users table for Ikigai Masala authentication
+-- Users table for Cost Estimator authentication
 -- Run this in the Supabase SQL Editor (Dashboard > SQL Editor > New query)
 --
 -- OPTIONAL. api/app.py currently registers no auth routes and no

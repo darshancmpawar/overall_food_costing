@@ -18,7 +18,6 @@ this file has the full story.
 ## 2. Install
 
 ```bash
-cd ikigai_masala-main
 pip install -r requirements-dev.txt   # runtime + pytest + ruff + bandit
 # or `-r requirements.txt` for runtime only (prod containers)
 ```

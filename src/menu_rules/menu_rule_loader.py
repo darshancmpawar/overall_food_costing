@@ -15,6 +15,7 @@ from .unique_items_menu_rule import UniqueItemsMenuRule
 from .coupling_menu_rule import CouplingMenuRule
 from .curd_side_menu_rule import CurdSideMenuRule
 from .premium_menu_rule import PremiumMenuRule
+from .plate_weight_rule import PlateWeightMenuRule
 from .theme_rules import (
     ThemeDayMenuRule,
     ThemeSlotFilterRule,
@@ -77,6 +78,7 @@ class MenuRuleLoader:
         'coupling': CouplingMenuRule,
         'curd_side': CurdSideMenuRule,
         'premium': PremiumMenuRule,
+        'plate_weight': PlateWeightMenuRule,
         'welcome_drink_color': WelcomeDrinkColorMenuRule,
         'week_signature_cooldown': WeekSignatureCooldownMenuRule,
         'theme_starter_preference': ThemeStarterPreferenceRule,

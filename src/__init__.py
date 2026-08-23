@@ -1,5 +1,5 @@
 """
-Ikigai Masala - Menu Planning System
+Cost Estimator - Menu Planning System
 A constraint-based menu planning tool for meal service providers
 """
 

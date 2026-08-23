@@ -394,6 +394,7 @@ Per-client overrides live in `data/configs/client_rules.json`.
 | `coupling` | hard | Item dependencies (curry ↔ rice, etc.) |
 | `curd_side` | hard | Fill the curd-side slot |
 | `premium` | hard | Per-horizon min / max for premium items |
+| `plate_weight` | hard | Total serving weight of one day's plate ≤ `max_kg` — see [Plate weight](#plate-weight) |
 | `welcome_drink_color` | hard | Color variety for welcome drinks |
 | `theme_day` | hard | Monday mix (≥1 south + ≥1 north) |
 | `theme_slot_filter` | pre-filter | Narrow pools by day theme (chinese / biryani / south / north) |
@@ -420,6 +421,73 @@ Rule configs are validated at load time. Invalid configs (for example
 that failed and skipped — the solver never sees them.
 
 ---
+
+### Plate weight
+
+`plate_weight` governs what one person is served in one day. The cap is
+per day, resolved by `src.constants.plate_cap_grams(day_type, slot_count)`:
+
+| Condition | Cap |
+|---|---|
+| More than 15 items on the plate | none — a counter serving eighteen lines can't fit the same total as one serving eleven |
+| Biryani day | **1100 g** — a 300 g biryani rice plus a 300 g non-veg biryani is genuinely a heavier meal |
+| Everything else | **1000 g** |
+
+The rule config takes no `max_kg` normally; setting one overrides the
+whole policy with a single ceiling on every day:
+
+```json
+{ "name": "plate_weight_cap", "type": "plate_weight" }
+```
+
+The cap counts every item served that day **including the constant
+accompaniments** (papad, pickle), which reach the solver as
+`SolverConfig.const_slot_grams` / `const_slot_count`. Counting them keeps
+the cap and the "Qty / Plate" figure the UI shows measuring the same
+plate.
+
+#### Fit first, trim second
+
+The two halves are deliberately split, and nothing is ever blocked:
+
+1. **The solver fits the plate where it can.** `apply()` compares each
+   day's cap against the lightest plate its cells could build — the
+   minimum candidate in every cell, which is exact, post-filter. Where
+   that fits, a hard constraint goes on the day and the solver builds a
+   plate within the cap while obeying every other rule.
+2. **Portions are trimmed where it can't.** A day whose lightest plate
+   already exceeds its cap is left *unconstrained* — forcing it would
+   fail the whole plan — and
+   `src.cost.plate_adjust.trim_portions()` brings it down instead, during
+   cost enrichment so the money reflects the food actually served.
+
+Trimming is shaped by the rules in `src.constants`:
+
+- `PLATE_TRIM_STEP_GRAMS` (5 g) — kitchens serve round numbers.
+- Off the heaviest portion each time, which is what makes the result
+  balanced: two 300 g items shed weight together and stay level.
+- `PLATE_TRIM_MAX_CUT_FRACTION` (25%) — no portion loses more than a
+  quarter of itself, which forces a large trim to spread across several
+  items and guarantees none reaches zero.
+
+A day that can't reach its cap within those limits is trimmed as far as
+they allow and left slightly heavy, rather than having a portion pushed
+below its floor.
+
+`diagnose()` reports which *themes* will be trimmed and by how much, as a
+**warning** — never an error, since there is always a way forward. It
+measures after projecting the other rules' pre-filters, because those are
+what make a themed day heavy: unfiltered a rice pool starts at 80 g, but
+the theme filter narrows a Biryani Wednesday to biryanis starting at
+300 g.
+
+Per-day results carry `day_qty_cap_g` and `day_qty_trimmed_g`; a trimmed
+item carries `portion_trimmed_g`.
+
+With the current ontology and a standard 11-category counter (15 items on
+the plate): mix, chinese, south and north days come in at 920–980 g by
+item choice alone, and a biryani day is trimmed 180–200 g to land on
+1100 g.
 
 ## Data model
 
@@ -468,6 +536,43 @@ the migration lands.
 > if the authentication layer is wired back into `api/app.py` — the
 > current build has no login path, so a database without `users` is
 > expected.
+
+### Serving weights and costs
+
+`cost_per_kg` and `grammage_per_serving` in `data/raw/menu_items.xlsx`
+are **XLOOKUP formulas** against a separate "Menu List" workbook, so the
+values the app reads are Excel's cached results — stale the moment prices
+move.
+
+That Menu List now ships as `data/raw/menu_prices.xlsx` and is read
+directly by `src.preprocessor.price_list.apply_price_list()`, which
+overrides both columns by normalised item name before cleansing. Costs
+therefore come from the source rather than a cache, and refreshing prices
+is a file drop. Items the list doesn't mention keep their cached values,
+so a partial list degrades instead of blanking out costing; a missing
+file logs a warning and changes nothing.
+
+Two consequences of the formulas remain:
+
+- The file cannot be corrected in place. Rewriting it with openpyxl
+  either discards every cached value (leaving the app with formula
+  strings and no cost data at all) or replaces formulas with literals
+  that the next upstream refresh would undo.
+- Corrections therefore live in code, in
+  `src.constants.COURSE_SERVING_GRAMMAGE_KG`, applied by
+  `DataCleanser._apply_course_grammage()` so they survive a re-export.
+
+Currently one course is normalised: **bread → 60 g**. Upstream carried
+three conventions in the same column — 30–70 g for one piece (correct),
+1000 g on 18 chapatti rows (a unit slip; that alone outweighed the other
+fourteen categories put together and made the plate read 2.03 kg), and
+0 g on 2 continental loaves. The whole course is set to one serving
+weight rather than the outliers being patched individually.
+
+The Menu List carries believable bread prices (₹58–120/kg, so ₹3.48–7.20
+a serving at 60 g), but its bread *weights* are still mixed — chapattis
+at 350 g, one dosa at 800 g — which is why the normalisation stays in
+place on top of the import.
 
 ### Slot expansion
 

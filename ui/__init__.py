@@ -1,1 +1,1 @@
-"""Streamlit UI package for Ikigai Masala Menu Planning."""
+"""Streamlit UI package for the Cost Estimator menu planner."""

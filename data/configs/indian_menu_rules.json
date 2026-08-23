@@ -41,6 +41,10 @@
       ]
     },
     {
+      "name": "plate_weight_cap",
+      "type": "plate_weight"
+    },
+    {
       "name": "premium_limits",
       "type": "premium",
       "max_per_day": 1,

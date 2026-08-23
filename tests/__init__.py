@@ -1,3 +1,3 @@
 """
-Test suite for Ikigai Masala menu planning system
+Test suite for the Cost Estimator menu planning system
 """

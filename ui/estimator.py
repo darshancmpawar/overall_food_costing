@@ -36,21 +36,21 @@ _MAX_PER_DAY = 3
 
 
 def _default_categories(metadata: Dict[str, Any]) -> List[str]:
-    """A sensible starting menu for a new estimate.
+    """The menu shape a new estimate starts from.
 
-    Defaults to ``required_pool_slots`` — the slots the ontology is
-    guaranteed to be able to fill — rather than every slot it knows
-    about. Starting with all of them would include the niche opt-in
-    lines (combined dal/sambar, curd rice) whose pools can legitimately
-    be empty, so a fresh estimate would open on a pre-flight error
-    instead of a menu. Operators add those deliberately.
+    Prefers the backend's ``default_counter_slots`` — a realistic client
+    counter — over ``required_pool_slots``, which is "every slot the
+    ontology can always fill". The latter is more courses than any real
+    client serves and builds a plate of roughly 1.28 kg before a single
+    item is chosen, so a fresh estimate would open on a plate-weight
+    error. Operators add the extra courses deliberately.
     """
     const = set(metadata.get("const_slots") or [])
-    required = metadata.get("required_pool_slots") or []
-    if required:
-        return [s for s in required if s not in const]
-    # Older backend without the field: fall back to everything non-constant.
-    return [s for s in (metadata.get("base_slot_names") or []) if s not in const]
+    for key in ("default_counter_slots", "required_pool_slots", "base_slot_names"):
+        candidates = metadata.get(key) or []
+        if candidates:
+            return [s for s in candidates if s not in const]
+    return []
 
 
 def render_frequency_picker(
