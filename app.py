@@ -41,6 +41,7 @@ from ui.formatters import (
 from ui import theme as t
 from ui.styles import STYLES
 from ui.backend_probe import health_check, pick_backend_port
+from src.cost.overall_cost import average_food_cost, day_costs_from_cost_data
 from ui.estimator import render_estimator_setup
 from ui.overall_cost import render_overall_estimated_cost
 from customisation.main import render_customisation_editor
@@ -55,6 +56,51 @@ logger = logging.getLogger(__name__)
 # plans (10–15 days) get the headroom CP-SAT needs for a quality solution.
 def _planning_time_limit(num_days: int) -> int:
     return min(600, max(60, num_days * 40))
+
+
+def _render_flow_steps(current: int) -> None:
+    """Render the estimator's three-stage rail: set up, menu, costing.
+
+    The estimator is a short pipeline whose stages appear one below the
+    other as they unlock, which is easy to lose your place in — the rail
+    says where you are and what is still ahead. *current* is 1-based;
+    stages before it render as done.
+    """
+    stages = ("Set up the counter", "Menu & plate cost", "Overall costing")
+    cells = []
+    for idx, label in enumerate(stages, start=1):
+        state = "done" if idx < current else (
+            "current" if idx == current else "next"
+        )
+        mark = "&#10003;" if state == "done" else str(idx)
+        cells.append(
+            f'<li class="flow-step flow-{state}">'
+            f'<span class="flow-num">{mark}</span>'
+            f'<span class="flow-label">{label}</span>'
+            f'</li>'
+        )
+    st.markdown(
+        f'<ol class="flow-rail">{"".join(cells)}</ol>',
+        unsafe_allow_html=True,
+    )
+
+
+def _estimator_window(serve_weekends: bool):
+    """Return ``(start_date, num_days)`` for a cost estimate.
+
+    An estimate has no saved history, so the calendar dates carry no
+    meaning of their own — the only thing they decide is which day theme
+    lands on which day. So rather than making the operator pick a range
+    that cannot affect the answer, an estimate always costs **one full
+    service week starting next Monday**: every configured day theme is
+    priced exactly once, which is what makes the average plate cost
+    representative.
+    """
+    today = dt.date.today()
+    # (7 - weekday) % 7 is 0 on a Monday, so `or 7` keeps the start in
+    # the future rather than landing on today.
+    start = today + dt.timedelta(days=((7 - today.weekday()) % 7) or 7)
+    return start, 7 if serve_weekends else 5
 
 
 def _render_view_error(view_name: str, exc: BaseException) -> None:
@@ -255,8 +301,10 @@ _SESSION_DEFAULTS = {
     "cost_data": {},
     # Planner mode. ``estimator_mode`` is the sidebar switch's own
     # boolean state; ``app_mode`` is the string form derived from it.
-    "estimator_mode": False,
-    "app_mode": MODE_EXISTING,
+    # The estimator is the default: pricing prospects is the common
+    # entry point, and it needs no database to be reachable.
+    "estimator_mode": True,
+    "app_mode": MODE_ESTIMATE,
     # The estimator setup the on-screen plan was generated from. Kept so
     # Regenerate can re-send it (the server stores nothing about a
     # prospective client) and so the metric cards can label the plan.
@@ -358,14 +406,22 @@ with st.sidebar:
                      "menu shape and day themes.",
             )
 
-    start_date = st.date_input("Start date", value=dt.date.today(),
-                               min_value=dt.date(2020, 1, 1),
-                               max_value=dt.date.today() + dt.timedelta(days=730),
-                               key="planner_start_date")
-    num_days = st.slider("Service days", min_value=1, max_value=10, value=5,
-                         key="planner_num_days",
-                         help="Number of service days. Sat/Sun are skipped "
-                              "unless the client serves weekends.")
+    # Dates only matter when there is history to respect, which is the
+    # stored-client path. An estimate has none, so it costs one full
+    # service week starting next Monday — see _estimator_window().
+    start_date = None
+    num_days = 0
+    if not is_estimate_mode:
+        start_date = st.date_input(
+            "Start date", value=dt.date.today(),
+            min_value=dt.date(2020, 1, 1),
+            max_value=dt.date.today() + dt.timedelta(days=730),
+            key="planner_start_date")
+        num_days = st.slider(
+            "Service days", min_value=1, max_value=10, value=5,
+            key="planner_num_days",
+            help="Number of service days. Sat/Sun are skipped "
+                 "unless the client serves weekends.")
 
     st.divider()
     # In estimator mode the Generate button sits under the setup panel on
@@ -514,7 +570,8 @@ with _hdr_col1:
             unsafe_allow_html=True)
     else:
         _hint = (
-            "Set up a prospective client below, then generate a menu to cost it"
+            "Describe a prospective client below, then generate a menu to "
+            "cost it — one full service week, priced per plate"
             if is_estimate_mode
             else "Select a client and generate a plan to get started"
         )
@@ -533,6 +590,9 @@ with _hdr_col2:
 # the flow reads top to bottom: describe the client, generate, read the
 # costing. Collapsed once a plan is on screen to get out of the way.
 if is_estimate_mode:
+    _has_plan = bool(st.session_state.get("plan"))
+    _render_flow_steps(3 if _has_plan else 1)
+
     try:
         _est_metadata = _cached_editor_metadata(client)
     except (ConnectionError, OSError, ValueError, RuntimeError) as _exc:
@@ -543,17 +603,19 @@ if is_estimate_mode:
     if _est_metadata:
         _est_setup = render_estimator_setup(
             _est_metadata,
-            expanded=not st.session_state.get("plan"),
+            expanded=not _has_plan,
+            has_plan=_has_plan,
         )
 
     if _est_setup:
+        _est_start, _est_days = _estimator_window(_est_setup["serve_weekends"])
         with st.spinner(f"Estimating menu for {_est_setup['client_name']}..."):
             try:
                 result = client.estimate_plan(
                     _est_setup,
-                    start_date=start_date.isoformat(),
-                    num_days=num_days,
-                    time_limit_seconds=_planning_time_limit(num_days),
+                    start_date=_est_start.isoformat(),
+                    num_days=_est_days,
+                    time_limit_seconds=_planning_time_limit(_est_days),
                 )
                 _raw_solution = result.get("solution", {})
                 flat_plan, day_types = flatten_api_solution(_raw_solution)
@@ -734,29 +796,48 @@ if plan and plan_dates:
     total_items = sum(1 for d in plan_dates for s in sorted_slots
                       if plan.get(d, {}).get(s, ""))
 
-    _counter_metric = st.session_state.get("counter_name") or "—"
-    st.markdown(f"""<div class="metrics-grid">
-        <div class="metric-card">
-            <div class="metric-label">Client</div>
-            <div class="metric-value">{html.escape(st.session_state.client_name or "")}</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">Counter</div>
-            <div class="metric-value">{html.escape(str(_counter_metric))}</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">Days</div>
-            <div class="metric-value">{len(plan_dates)}</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">Slots per day</div>
-            <div class="metric-value">{len(sorted_slots)}</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">Total items</div>
-            <div class="metric-value">{total_items}</div>
-        </div>
-    </div>""", unsafe_allow_html=True)
+    # Cards are assembled rather than hard-coded so the row carries only
+    # what this plan actually has: no counter in estimator mode (there is
+    # one ad-hoc line, so naming it says nothing), and no plate cost when
+    # the ontology has no cost columns. An empty "—" card is worse than
+    # no card.
+    _cards = [("Client", html.escape(st.session_state.client_name or ""))]
+    _counter_metric = st.session_state.get("counter_name")
+    if _counter_metric:
+        _cards.append(("Counter", html.escape(str(_counter_metric))))
+    _cards.append(("Days", str(len(plan_dates))))
+    _cards.append(("Slots per day", str(len(sorted_slots))))
+
+    _avg_plate = average_food_cost(
+        day_costs_from_cost_data(st.session_state.get("cost_data", {}))
+    )
+    if _avg_plate:
+        _cards.append(("Avg food cost / plate", f"₹{_avg_plate:,.2f}"))
+    else:
+        _cards.append(("Total items", str(total_items)))
+
+    st.markdown(
+        '<div class="metrics-grid">'
+        + "".join(
+            f'<div class="metric-card">'
+            f'<div class="metric-label">{label}</div>'
+            f'<div class="metric-value">{value}</div>'
+            f'</div>'
+            for label, value in _cards
+        )
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # In estimator mode the costing panel IS the deliverable, so it opens
+    # from directly under the headline numbers rather than from below a
+    # 19-row menu table. For a stored client the plan itself is the
+    # deliverable and saving it is the main action, so there the button
+    # keeps its place under the table.
+    _oc_cost_data = st.session_state.get("cost_data", {})
+    if is_estimate_mode and _oc_cost_data:
+        render_overall_estimated_cost(_oc_cost_data)
+        st.markdown("")
 
     if st.session_state.pool_warnings:
         with st.expander(f"Pool warnings ({len(st.session_state.pool_warnings)})", expanded=False):
@@ -835,8 +916,8 @@ if plan and plan_dates:
     # Overall estimated cost — scales the average per-plate food cost up to a
     # fully-loaded operating cost and breaks it into editable operating lines.
     # Only meaningful once the plan is costed, so it's gated on cost_data.
-    _oc_cost_data = st.session_state.get("cost_data", {})
-    if _oc_cost_data:
+    # Estimator mode already rendered it above the table.
+    if not is_estimate_mode and _oc_cost_data:
         render_overall_estimated_cost(_oc_cost_data)
         st.markdown("")
 

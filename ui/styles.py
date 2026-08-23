@@ -309,6 +309,46 @@ STYLES = f"""
     .plan-source-badge {{ font-family: var(--font-body); }}
 
     /* ================================================================
+       FLOW RAIL  —  the estimator's three stages
+       ================================================================ */
+    .stApp ol.flow-rail {{
+        list-style: none !important;
+        display: flex !important; align-items: center; flex-wrap: wrap;
+        gap: 0.4rem 1.15rem;
+        list-style: none; margin: 0 0 1.5rem; padding: 0;
+    }}
+    .stApp .flow-rail li.flow-step {{
+        display: flex !important;
+        list-style: none; align-items: center; gap: 0.5rem;
+        font-size: 0.82rem; font-weight: 600; white-space: nowrap;
+    }}
+    /* A hairline between stages, drawn on the item rather than as a
+       separate element so the row can wrap on narrow screens. */
+    .stApp .flow-rail li.flow-step + li.flow-step::before {{
+        content: ''; width: 26px; height: 1px;
+        background: var(--border-subtle); margin-right: 0.6rem;
+    }}
+    .stApp .flow-rail .flow-num {{
+        width: 22px; height: 22px; border-radius: 50%;
+        display: inline-flex; align-items: center; justify-content: center;
+        font-size: 0.72rem; font-weight: 700; flex-shrink: 0;
+    }}
+    .stApp .flow-rail .flow-current .flow-num {{
+        background: var(--yellow); color: var(--text);
+    }}
+    .stApp .flow-rail .flow-current .flow-label {{ color: var(--text); }}
+    .stApp .flow-rail .flow-done .flow-num {{
+        background: var(--success-bg); color: var(--success-fg);
+        box-shadow: inset 0 0 0 1px var(--success);
+    }}
+    .stApp .flow-rail .flow-done .flow-label {{ color: var(--text-2); }}
+    .stApp .flow-rail .flow-next .flow-num {{
+        background: var(--surface); color: var(--text-3);
+        box-shadow: inset 0 0 0 1px var(--border-subtle);
+    }}
+    .stApp .flow-rail .flow-next .flow-label {{ color: var(--text-3); font-weight: 500; }}
+
+    /* ================================================================
        METRIC CARDS  (custom .metric-card grid)
        ================================================================ */
     .metrics-grid {{
