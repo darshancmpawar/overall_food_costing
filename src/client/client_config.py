@@ -96,6 +96,7 @@ __all__ = [
     # re-exported here: api.app surfaces both in /editor-metadata and has
     # imported them from this module since before the counters schema.
     'AVAILABLE_THEMES',
+    'build_adhoc_client_config',
     'ClientConfig',
     'ClientConfigLoader',
     'ConcurrentEditError',
@@ -243,6 +244,86 @@ def _normalise_categories(raw) -> List[str]:
         if str(s).strip().lower() in known
     ]
     return _dedupe_preserve_order(out)
+
+
+def build_adhoc_client_config(
+    name: str,
+    categories,
+    slot_counts=None,
+    theme_map=None,
+    *,
+    serve_weekends: bool = False,
+    item_cooldown_days: int = DEFAULT_ITEM_COOLDOWN_DAYS,
+    source_pools=None,
+    counter_name: str = DEFAULT_COUNTER_NAME,
+) -> ClientConfig:
+    """Build a :class:`ClientConfig` from a request body — no database.
+
+    This is the Cost Estimator path: an operator prices a *prospective*
+    client by describing its menu shape inline (categories, per-slot
+    counts, day themes) without a ``clients`` row existing. Nothing here
+    reads or writes Supabase, so the estimate works against an empty
+    database and can never leave a half-created client behind.
+
+    Values go through the same normalisation the stored path uses —
+    :func:`_normalise_categories`, :func:`_normalise_theme_map`, and the
+    slot-count/expansion rules — so the solver receives a config that is
+    indistinguishable from a saved one. The one deliberate difference is
+    that ``core_min_one_slots`` is *not* applied: that setting lives in
+    ``app_settings`` and reading it would mean a Supabase round trip, and
+    an estimator asking for one item per line should get exactly that.
+
+    Raises:
+        ValueError: when *categories* contains no recognised slot, since
+            a menu with no serving lines has nothing to cost.
+    """
+    label = str(name or '').strip() or 'New Client'
+    cats = _normalise_categories(list(categories or []))
+    if not cats:
+        raise ValueError(
+            'categories must name at least one known menu slot '
+            '(e.g. rice, bread, veg_gravy).'
+        )
+
+    stored_counts = slot_counts if isinstance(slot_counts, dict) else {}
+    active = set(cats)
+    counts: Dict[str, int] = {}
+    for slot in BASE_SLOTS:
+        if slot not in active:
+            counts[slot] = 0
+            continue
+        try:
+            counts[slot] = max(0, int(stored_counts.get(slot, 1)))
+        except (TypeError, ValueError):
+            counts[slot] = 1
+
+    themes = _normalise_theme_map(theme_map, serve_weekends=serve_weekends)
+    counter = CounterConfig(
+        name=str(counter_name or DEFAULT_COUNTER_NAME).strip()
+        or DEFAULT_COUNTER_NAME,
+        categories=cats,
+        slot_counts=counts,
+        theme_map=themes,
+        active_slots=ClientConfigLoader._expand(cats, counts),
+    )
+    try:
+        cooldown = max(0, int(item_cooldown_days))
+    except (TypeError, ValueError):
+        cooldown = DEFAULT_ITEM_COOLDOWN_DAYS
+    return ClientConfig(
+        name=label,
+        active_slots=list(counter.active_slots),
+        slot_counts=dict(counter.slot_counts),
+        theme_map=dict(counter.theme_map),
+        counter_name=counter.name,
+        counters=[counter],
+        city='',
+        serve_weekends=bool(serve_weekends),
+        item_cooldown_days=cooldown,
+        source_pools=[
+            str(p).strip() for p in (source_pools or []) if str(p).strip()
+        ],
+    )
 
 
 class ClientConfigLoader:

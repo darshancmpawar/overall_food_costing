@@ -35,10 +35,13 @@ from ui.formatters import (
     format_item_html_with_cost,
     slot_sort_key,
     THEME_TAG_COLORS,
+    THEME_TAG_NEUTRAL,
     THEME_ICONS,
 )
+from ui import theme as t
 from ui.styles import STYLES
 from ui.backend_probe import health_check, pick_backend_port
+from ui.estimator import render_estimator_setup
 from ui.overall_cost import render_overall_estimated_cost
 from customisation.main import render_customisation_editor
 
@@ -188,6 +191,38 @@ def _cached_list_counters(_api: MenuApiClient, client_name: str) -> list:
         return []
     return _api.list_counters(client_name)
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_editor_metadata(_api: MenuApiClient) -> dict:
+    """Slot vocabulary / theme list for the Cost Estimator's setup panel.
+
+    Static for the life of a deploy (it's derived from ``src.constants``),
+    so a 5-minute TTL is generous.
+    """
+    return _api.get_editor_metadata()
+
+# ---------------------------------------------------------------------------
+# Modes
+# ---------------------------------------------------------------------------
+# The planner runs in one of two modes, picked in the sidebar before any
+# client is selected:
+#
+#   existing — plan for a client configured in the database. Reads its
+#              counters, honours its saved history, and can save back.
+#   estimate — "Cost Estimator For New Clients": describe a prospective
+#              client's counter inline, generate a menu from it, and cost
+#              it. Nothing is read from or written to the client tables.
+#
+# Both modes converge on the same plan table, cost footer, and Overall
+# Estimated Cost panel — only the inputs differ.
+MODE_EXISTING = "existing"
+MODE_ESTIMATE = "estimate"
+
+_MODE_LABELS = {
+    MODE_EXISTING: "Existing Client",
+    MODE_ESTIMATE: "Cost Estimator For New Clients",
+}
+
 # ---------------------------------------------------------------------------
 # Session state initialization (only after auth)
 # ---------------------------------------------------------------------------
@@ -218,6 +253,12 @@ _SESSION_DEFAULTS = {
     # Per-item and per-day cost data extracted from the enriched API
     # solution. Empty dict when the Excel has no cost columns.
     "cost_data": {},
+    # Which planner mode is active — see MODE_* above.
+    "app_mode": MODE_EXISTING,
+    # The estimator setup the on-screen plan was generated from. Kept so
+    # Regenerate can re-send it (the server stores nothing about a
+    # prospective client) and so the metric cards can label the plan.
+    "estimate_setup": None,
 }
 for key, default in _SESSION_DEFAULTS.items():
     if key not in st.session_state:
@@ -250,32 +291,56 @@ with st.sidebar:
         </div>
     </div>""", unsafe_allow_html=True)
 
-    try:
-        clients_list = _cached_list_clients(client)
-    except (ConnectionError, OSError, ValueError):
-        clients_list = []
-        st.error("Cannot reach API.")
+    # Mode switch comes first: it decides whether the controls below are
+    # a client picker or nothing at all (the estimator's setup lives on
+    # the page, where it has room for four editors).
+    st.markdown('<p class="mode-switch-label">Mode</p>', unsafe_allow_html=True)
+    app_mode = st.radio(
+        "Mode",
+        [MODE_EXISTING, MODE_ESTIMATE],
+        format_func=lambda m: _MODE_LABELS[m],
+        key="app_mode",
+        label_visibility="collapsed",
+    )
+    is_estimate_mode = (app_mode == MODE_ESTIMATE)
 
-    selected_client = st.selectbox("Client",
-        clients_list if clients_list else ["(no clients)"],
-        key="planner_client_select")
+    selected_client = None
+    selected_counter = None
 
-    # Counter picker. A client's serving lines each have their own slot
-    # set and day themes, so the planner works one counter at a time.
-    # Single-counter clients (most of them) get no extra widget.
-    counters_list = []
-    if selected_client and selected_client != "(no clients)":
-        try:
-            counters_list = _cached_list_counters(client, selected_client)
-        except (ConnectionError, OSError, ValueError, RuntimeError) as e:
-            st.warning(f"Couldn't load counters ({e}).")
-    selected_counter = counters_list[0] if counters_list else None
-    if len(counters_list) > 1:
-        selected_counter = st.selectbox(
-            "Counter", counters_list, key="planner_counter_select",
-            help="Each counter is a separate serving line with its own "
-                 "menu shape and day themes.",
+    if is_estimate_mode:
+        st.markdown(
+            '<div class="mode-note">Price a prospective client: set up a '
+            'counter on the page, generate a menu, then open the costing '
+            'panel. Nothing is saved to the database.</div>',
+            unsafe_allow_html=True,
         )
+    else:
+        try:
+            clients_list = _cached_list_clients(client)
+        except (ConnectionError, OSError, ValueError):
+            clients_list = []
+            st.error("Cannot reach API.")
+
+        selected_client = st.selectbox("Client",
+            clients_list if clients_list else ["(no clients)"],
+            key="planner_client_select")
+
+        # Counter picker. A client's serving lines each have their own slot
+        # set and day themes, so the planner works one counter at a time.
+        # Single-counter clients (most of them) get no extra widget.
+        counters_list = []
+        if selected_client and selected_client != "(no clients)":
+            try:
+                counters_list = _cached_list_counters(client, selected_client)
+            except (ConnectionError, OSError, ValueError, RuntimeError) as e:
+                st.warning(f"Couldn't load counters ({e}).")
+        selected_counter = counters_list[0] if counters_list else None
+        if len(counters_list) > 1:
+            selected_counter = st.selectbox(
+                "Counter", counters_list, key="planner_counter_select",
+                help="Each counter is a separate serving line with its own "
+                     "menu shape and day themes.",
+            )
 
     start_date = st.date_input("Start date", value=dt.date.today(),
                                min_value=dt.date(2020, 1, 1),
@@ -287,33 +352,38 @@ with st.sidebar:
                               "unless the client serves weekends.")
 
     st.divider()
-    generate_clicked = st.button("Generate Menu Plan", type="primary",
-                                 key="planner_generate_btn",
-                                 use_container_width=True)
+    # In estimator mode the Generate button sits under the setup panel on
+    # the page instead, so the operator fills the form and submits it in
+    # one place rather than reaching back into the sidebar.
+    generate_clicked = False
+    if not is_estimate_mode:
+        generate_clicked = st.button("Generate Menu Plan", type="primary",
+                                     key="planner_generate_btn",
+                                     use_container_width=True)
 
 # ---------------------------------------------------------------------------
 # Page header
 # ---------------------------------------------------------------------------
 _hdr_col1, _hdr_col2 = st.columns([5, 2])
 _SOURCE_BADGES = {
-    # bg, fg, label, title attr  (warm palette — see ui/styles.py)
-    "history":  ("#14271C", "#8FD6A6", "Loaded from history",
+    # bg, fg, label, title attr  (Pulse palette — see ui/theme.py)
+    "history":  (t.SUCCESS_BG, t.SUCCESS_FG, "Loaded from history",
                  "These exact dates already had a saved plan — shown as-is."),
-    "solver":   ("#2A1E0E", "#F2A03D", "Freshly generated",
+    "solver":   (t.BRAND_YELLOW_BG, t.BRAND_YELLOW_FG, "Freshly generated",
                  "No saved plan for these dates — solver produced this from scratch."),
-    "modified": ("#2A2410", "#E8C24A", "Modified — unsaved",
+    "modified": (t.WARNING_BG, t.WARNING_FG, "Modified — unsaved",
                  "You regenerated at least one cell since this plan was loaded."),
-    "preflight_blocked": ("#2E1410", "#EF8A6A", "Pre-flight blocked",
+    "preflight_blocked": (t.ERROR_BG, t.ERROR_FG, "Pre-flight blocked",
                  "Diagnostic checks found a guaranteed failure; solver skipped."),
+    # Cost-estimator mode: nothing here touches the database.
+    "estimate": (t.PURPLE_BG, t.PURPLE_FG, "Cost estimate — not saved",
+                 "Generated from an ad-hoc setup for a prospective client. "
+                 "Nothing is written to the database."),
 }
 
 
 # bg, fg, label per Diagnostic severity (matches docs/api.md examples).
-_SEVERITY_STYLE = {
-    "error":   ("#2E1410", "#EF8A6A", "Error"),
-    "warning": ("#2A2410", "#E8C24A", "Warning"),
-    "info":    ("#16242E", "#7FB6D9", "Info"),
-}
+_SEVERITY_STYLE = dict(t.SEVERITY_STYLES)
 
 
 def _render_diagnostics_expander(diagnostics, summary):
@@ -351,7 +421,9 @@ def _render_diagnostics_expander(diagnostics, summary):
             items = grouped[sev]
             if not items:
                 continue
-            bg, fg, sev_label = _SEVERITY_STYLE.get(sev, ("#2A2219", "#9A8C77", sev.title()))
+            bg, fg, sev_label = _SEVERITY_STYLE.get(
+                sev, (t.DISABLED_BG, t.TEXT_2, sev.title()),
+            )
             st.markdown(
                 f'<p style="font-size:0.85rem;font-weight:700;color:{fg};'
                 f'margin:0.5rem 0 0.4rem;">{sev_label}'
@@ -370,7 +442,7 @@ def _render_diagnostics_expander(diagnostics, summary):
                 for k in ("date", "day_type", "slot"):
                     if k in affected:
                         chips.append(
-                            f'<span style="background:#2A2219;color:#9A8C77;'
+                            f'<span style="background:{t.DISABLED_BG};color:{t.TEXT_2};'
                             f'border-radius:99px;padding:1px 8px;font-size:0.65rem;'
                             f'margin-right:4px;">{html.escape(str(affected[k]))}</span>'
                         )
@@ -386,9 +458,9 @@ def _render_diagnostics_expander(diagnostics, summary):
                     f'padding:1px 7px;border-radius:99px;">{rule_pill}</span>'
                     f'{chip_html}'
                     f'</div>'
-                    f'<div style="color:#F7F1E6;font-size:0.85rem;'
+                    f'<div style="color:{t.TEXT};font-size:0.875rem;'
                     f'line-height:1.4;">{msg}</div>'
-                    + (f'<div style="color:#C9BCA8;font-size:0.75rem;'
+                    + (f'<div style="color:{t.TEXT_2};font-size:0.78rem;'
                        f'margin-top:0.25rem;">Fix: {suggestion}</div>'
                        if suggestion else '')
                     + '</div>',
@@ -397,7 +469,11 @@ def _render_diagnostics_expander(diagnostics, summary):
 
 
 with _hdr_col1:
-    st.markdown('<p class="page-title">Menu Plan</p>', unsafe_allow_html=True)
+    _page_title = (
+        "Cost Estimator" if is_estimate_mode else "Menu Plan"
+    )
+    st.markdown(f'<p class="page-title">{_page_title}</p>',
+                unsafe_allow_html=True)
     if st.session_state.client_name:
         src = st.session_state.get("plan_source")
         badge_html = ""
@@ -421,13 +497,86 @@ with _hdr_col1:
             f'{_who}{badge_html}</p>',
             unsafe_allow_html=True)
     else:
+        _hint = (
+            "Set up a prospective client below, then generate a menu to cost it"
+            if is_estimate_mode
+            else "Select a client and generate a plan to get started"
+        )
         st.markdown(
-            '<p class="page-subtitle">Select a client and generate a plan to get started</p>',
+            f'<p class="page-subtitle">{_hint}</p>',
             unsafe_allow_html=True)
 with _hdr_col2:
     if st.button("Edit Logic", key="open_editor_btn", use_container_width=True):
         st.session_state.view = "editor"
         st.rerun()
+
+# ---------------------------------------------------------------------------
+# Cost Estimator setup (estimate mode only)
+# ---------------------------------------------------------------------------
+# The setup panel and its Generate button render above the plan table, so
+# the flow reads top to bottom: describe the client, generate, read the
+# costing. Collapsed once a plan is on screen to get out of the way.
+if is_estimate_mode:
+    try:
+        _est_metadata = _cached_editor_metadata(client)
+    except (ConnectionError, OSError, ValueError, RuntimeError) as _exc:
+        _est_metadata = None
+        st.error(f"Couldn't load the slot / theme vocabulary ({_exc}).")
+
+    _est_setup = None
+    if _est_metadata:
+        _est_setup = render_estimator_setup(
+            _est_metadata,
+            expanded=not st.session_state.get("plan"),
+        )
+
+    if _est_setup:
+        with st.spinner(f"Estimating menu for {_est_setup['client_name']}..."):
+            try:
+                result = client.estimate_plan(
+                    _est_setup,
+                    start_date=start_date.isoformat(),
+                    num_days=num_days,
+                    time_limit_seconds=_planning_time_limit(num_days),
+                )
+                _raw_solution = result.get("solution", {})
+                flat_plan, day_types = flatten_api_solution(_raw_solution)
+                st.session_state.plan = flat_plan
+                st.session_state.plan_dates = sorted(flat_plan.keys())
+                st.session_state.day_types = day_types
+                st.session_state.client_name = _est_setup["client_name"]
+                # A prospective client has exactly one ad-hoc counter, so
+                # there is no line to name in the header.
+                st.session_state.counter_name = None
+                st.session_state.estimate_setup = _est_setup
+                st.session_state.changes_log = []
+                st.session_state.pool_warnings = result.get("pool_warnings", [])
+                st.session_state.plan_source = "estimate"
+                st.session_state.rule_diagnostics = (
+                    result.get("rule_diagnostics") or []
+                )
+                st.session_state.diagnostics_summary = result.get("summary")
+                st.session_state.cost_data = extract_cost_data(_raw_solution)
+                st.rerun()
+            except RuleDiagnosticsBlockedError as e:
+                # The setup can't produce a valid menu (e.g. a 10-day plan
+                # against a category with 6 items). Show the diagnostics so
+                # the operator can trim the setup rather than guess.
+                st.session_state.plan = None
+                st.session_state.plan_dates = []
+                st.session_state.day_types = {}
+                st.session_state.client_name = _est_setup["client_name"]
+                st.session_state.counter_name = None
+                st.session_state.estimate_setup = _est_setup
+                st.session_state.changes_log = []
+                st.session_state.pool_warnings = []
+                st.session_state.plan_source = "preflight_blocked"
+                st.session_state.rule_diagnostics = e.diagnostics or []
+                st.session_state.diagnostics_summary = e.summary or None
+                st.session_state.cost_data = {}
+                st.rerun()
+            except (ConnectionError, OSError, ValueError, RuntimeError) as e:
+                st.error(f"Estimate failed: {e}")
 
 # ---------------------------------------------------------------------------
 # Generate
@@ -609,7 +758,7 @@ if plan and plan_dates:
         for d_str in plan_dates:
             d = dt.date.fromisoformat(d_str)
             day_type = _day_types.get(d_str, "")
-            bg, fg = THEME_TAG_COLORS.get(day_type, ("#2A2219", "#9A8C77"))
+            bg, fg = THEME_TAG_COLORS.get(day_type, THEME_TAG_NEUTRAL)
             icon = THEME_ICONS.get(day_type, "")
             label = day_type.replace("_", " ").title() if day_type else ""
             header_html += (
@@ -675,11 +824,14 @@ if plan and plan_dates:
         render_overall_estimated_cost(_oc_cost_data)
         st.markdown("")
 
-    # Action buttons
+    # Action buttons. Save is omitted in estimator mode — the client
+    # doesn't exist, so there is nothing to write history against.
     c1, c2, c3, _ = st.columns([1, 1, 1, 3])
     with c1:
-        if st.button("Save to History", key="planner_save_btn",
-                     use_container_width=True):
+        if is_estimate_mode:
+            st.caption("Estimates aren't saved to history.")
+        elif st.button("Save to History", key="planner_save_btn",
+                       use_container_width=True):
             try:
                 client.save(client_name=st.session_state.client_name,
                             week_plan=plan, week_start=plan_dates[0],
@@ -728,6 +880,7 @@ if plan and plan_dates:
             st.session_state.rule_diagnostics = []
             st.session_state.diagnostics_summary = None
             st.session_state.cost_data = {}
+            st.session_state.estimate_setup = None
             st.rerun()
 
     # Regeneration
@@ -752,7 +905,7 @@ if plan and plan_dates:
         for i, d_str in enumerate(plan_dates):
             d = dt.date.fromisoformat(d_str)
             day_type = _day_types.get(d_str, "")
-            bg, fg = THEME_TAG_COLORS.get(day_type, ("#2A2219", "#9A8C77"))
+            bg, fg = THEME_TAG_COLORS.get(day_type, THEME_TAG_NEUTRAL)
             icon = THEME_ICONS.get(day_type, "")
             label = day_type.replace("_", " ").title() if day_type else ""
             col = cols[i % regen_cols_per_row]
@@ -783,13 +936,25 @@ if plan and plan_dates:
                 }
                 with st.spinner("Regenerating..."):
                     try:
-                        result = client.regenerate(
-                            client_name=st.session_state.client_name,
-                            base_plan=plan, replace_slots=regen_selections,
-                            start_date=plan_dates[0],
-                            num_days=len(plan_dates),
-                            time_limit_seconds=_planning_time_limit(len(plan_dates)),
-                            counter=st.session_state.counter_name)
+                        if is_estimate_mode:
+                            # The server keeps no record of a prospective
+                            # client, so the setup rides along with the
+                            # regenerate call.
+                            result = client.estimate_regenerate(
+                                st.session_state.estimate_setup or {},
+                                base_plan=plan,
+                                replace_slots=regen_selections,
+                                start_date=plan_dates[0],
+                                num_days=len(plan_dates),
+                                time_limit_seconds=_planning_time_limit(len(plan_dates)))
+                        else:
+                            result = client.regenerate(
+                                client_name=st.session_state.client_name,
+                                base_plan=plan, replace_slots=regen_selections,
+                                start_date=plan_dates[0],
+                                num_days=len(plan_dates),
+                                time_limit_seconds=_planning_time_limit(len(plan_dates)),
+                                counter=st.session_state.counter_name)
                         _raw_regen = result.get("solution", {})
                         flat_regen, regen_day_types = flatten_api_solution(_raw_regen)
                         st.session_state.cost_data = extract_cost_data(_raw_regen)
@@ -824,8 +989,11 @@ if plan and plan_dates:
                             # no longer matches the saved version (if
                             # there was one). Flip to "modified" so the
                             # badge nudges the user to Save again to
-                            # persist their edits.
-                            st.session_state.plan_source = "modified"
+                            # persist their edits. An estimate has no
+                            # saved version to diverge from, so it keeps
+                            # its own badge.
+                            if not is_estimate_mode:
+                                st.session_state.plan_source = "modified"
                         else:
                             st.session_state.changes_log.append({
                                 "kind": "info",
@@ -869,6 +1037,13 @@ if plan and plan_dates:
                         unsafe_allow_html=True,
                     )
 
+elif is_estimate_mode:
+    st.markdown("""<div class="empty-state">
+        <div class="empty-icon">&#128200;</div>
+        <h3>No estimate yet</h3>
+        <p>Fill in <b>Client Setup</b> above and click
+        <b>Generate Menu</b><br>to build a menu and cost it.</p>
+    </div>""", unsafe_allow_html=True)
 else:
     st.markdown("""<div class="empty-state">
         <div class="empty-icon">&#127835;</div>

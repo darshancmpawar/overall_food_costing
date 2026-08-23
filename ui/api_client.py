@@ -185,6 +185,70 @@ class MenuApiClient:
         resp = _with_one_retry(_do, retryable=True)
         return _parse_response(resp, "Regenerate failed")
 
+    def estimate_plan(
+        self,
+        setup: Dict[str, Any],
+        start_date: str,
+        num_days: int = 5,
+        time_limit_seconds: int = 240,
+    ) -> Dict[str, Any]:
+        """Generate a plan for a prospective client described inline.
+
+        *setup* is the Cost Estimator config —
+        ``{client_name, categories, slot_counts, theme_map,
+        serve_weekends}`` — sent as-is, since nothing about a prospective
+        client is stored server-side. The response mirrors :meth:`plan`
+        with the same cost enrichment the costing panel reads.
+        """
+        payload = {
+            **setup,
+            "start_date": start_date,
+            "num_days": num_days,
+            "time_limit_seconds": time_limit_seconds,
+        }
+
+        def _do():
+            return self.session.post(
+                f"{self.base_url}/api/v1/estimate-plan", json=payload,
+                timeout=time_limit_seconds + 30,
+            )
+        # Same reasoning as /plan: a pure read, so a retry only costs a
+        # second solve.
+        resp = _with_one_retry(_do, retryable=True)
+        return _parse_response(resp, "Estimate failed")
+
+    def estimate_regenerate(
+        self,
+        setup: Dict[str, Any],
+        base_plan: Dict[str, Dict[str, str]],
+        replace_slots: Dict[str, List[str]],
+        start_date: Optional[str] = None,
+        num_days: int = 5,
+        time_limit_seconds: int = 240,
+    ) -> Dict[str, Any]:
+        """Regenerate selected cells of a Cost Estimator plan.
+
+        The estimator *setup* has to be re-sent alongside the plan, since
+        the server holds no record of the prospective client.
+        """
+        payload = {
+            **setup,
+            "base_plan": base_plan,
+            "replace_slots": replace_slots,
+            "num_days": num_days,
+            "time_limit_seconds": time_limit_seconds,
+        }
+        if start_date:
+            payload["start_date"] = start_date
+
+        def _do():
+            return self.session.post(
+                f"{self.base_url}/api/v1/estimate-regenerate", json=payload,
+                timeout=time_limit_seconds + 30,
+            )
+        resp = _with_one_retry(_do, retryable=True)
+        return _parse_response(resp, "Estimate regenerate failed")
+
     def save(
         self,
         client_name: str,

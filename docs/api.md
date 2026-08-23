@@ -18,11 +18,13 @@ accept or supply it to correlate traces across logs.
 | GET    | `/clients` | List client names |
 | GET    | `/client-counters/<name>` | List a client's counter (serving-line) names |
 | POST   | `/plan` | Generate a plan |
+| POST   | `/estimate-plan` | Generate a plan for a **prospective** client described inline — see [Cost Estimator](#cost-estimator-prospective-clients) |
 | POST   | `/regenerate` | Regenerate selected cells |
+| POST   | `/estimate-regenerate` | Regenerate selected cells of an estimate |
 | POST   | `/save` | Persist plan to history (overwrites the prior menu for the same `(client, counter, dates)`) |
 | GET    | `/saved-plan` | Return the saved plan for `(client_name, counter, start_date, num_days)` if one exists — used by Streamlit's Generate flow to replay saved menus deterministically |
 | POST   | `/diagnose` | Run the pre-flight rule diagnostics without invoking the solver (replaces the old `/validate-pools` surface) |
-| GET    | `/editor-metadata` | Slot / theme metadata for the editor UI |
+| GET    | `/editor-metadata` | Slot / theme metadata for the editor UI and the Cost Estimator setup panel. Degrades to `clients: []` (never a 500) when the client list can't be read, so pricing a prospect doesn't depend on the stored-client table |
 | GET    | `/client-config/<name>` | Read a client's config, all counters included (returns `ETag: "<version>"`) |
 | PUT    | `/client-config/<name>` | Update a client's config or one of its counters (requires `version` body field or `If-Match` header) |
 | POST   | `/client` | Create a client with its first counter |
@@ -230,6 +232,61 @@ new code should consume `rule_diagnostics` directly.
 
 The old `POST /api/v1/validate-pools` endpoint is **removed** — its
 surface is fully subsumed by `/diagnose`.
+
+---
+
+## Cost Estimator (prospective clients)
+
+`POST /estimate-plan` prices a client that **does not exist yet**. The
+menu shape arrives in the request instead of being read from the
+`clients` table:
+
+```json
+{
+  "client_name":  "Acme Corp",
+  "categories":   ["rice", "bread", "veg_gravy", "papad"],
+  "slot_counts":  {"veg_dry": 2},
+  "theme_map":    {"monday": "south", "tuesday": "chinese_continental"},
+  "serve_weekends": false,
+  "start_date":   "2026-09-07",
+  "num_days":     5,
+  "time_limit_seconds": 200
+}
+```
+
+Only `categories` is required. Missing per-slot counts default to 1,
+missing days fall back to the [default theme schedule](#default-theme-schedule),
+extended theme names are canonicalised, and unknown slot names are
+dropped. A body whose `categories` contains no recognised slot is a
+**400** — there is no menu to cost.
+
+**`client_name` is a label, not a lookup key.** It is echoed back in the
+response message and never resolved against the `clients` table, so a
+name that already exists is neither matched nor conflicted with.
+
+The response mirrors [`/plan`](#plan-response) — same `solution` shape,
+same per-item / per-day cost enrichment, same `rule_diagnostics` and
+pre-flight 422 gate — plus `"estimate": true`.
+
+### What the estimator deliberately does not do
+
+| | Why |
+|---|---|
+| No Supabase read or write | An estimate for a deal that never closes must not leave a half-created client, or a history row, behind. The endpoint works against an empty database. |
+| No history, so no cooldown bans | A prospect has served nothing. The cooldown / rice-bread-gap / week-signature rules stay in the pipeline as no-ops rather than being removed, so an estimate runs through exactly the same rule set a real plan does. |
+| No per-client rules | `client_rules.json` is keyed by name. Matching a name an operator just typed would silently apply another client's ingredient bans to an unrelated estimate. |
+| No `core_min_one_slots` floor | That setting lives in `app_settings`; reading it would mean a round trip, and an estimator asking for one item per line should get exactly one. |
+| No save path | `/save` is unreachable from this flow — the UI hides the button. |
+
+`/estimate-plan` shares the `plan` rate-limit bucket with `/plan`, and
+`/estimate-regenerate` shares `regenerate`: both spend the same solver
+budget, so they throttle together. Outcomes are counted separately as
+`estimate_requests_total` / `estimate_regenerate_requests_total`.
+
+`POST /estimate-regenerate` takes the same body plus `base_plan` and
+`replace_slots` (as `/regenerate`). The estimator config has to be
+re-sent because nothing about the prospective client is stored
+server-side.
 
 ---
 
@@ -470,13 +527,27 @@ and go infeasible.
 
 ### UI theme badges
 
-| Theme | Badge background |
+Colour tokens live in `ui/theme.py` (the Pulse / OP Lens palette);
+`ui/styles.py` mirrors them into CSS custom properties and every inline
+style imports them, so the two can't drift.
+
+| Theme | Family | Background | Text |
+|---|---|---|---|
+| Mix | Brand blue | `#EBF3FF` | `#0A58CA` |
+| Chinese | Purple | `#F1EAFB` | `#5A34A3` |
+| Biryani | Brand yellow | `#FFF6E3` | `#8A5A00` |
+| South | Success green | `#E5FFF1` | `#0F7A42` |
+| North | Warning orange | `#FFF5E8` | `#B35F00` |
+
+### Plan-source badges
+
+| Badge | Meaning |
 |---|---|
-| Mix | `#22543d` |
-| Chinese | `#7c2d12` |
-| Biryani | `#7f1d1d` |
-| South | `#1e3a5f` |
-| North | `#4c1d95` |
+| Loaded from history | These dates already had a saved plan; `/saved-plan` returned it |
+| Freshly generated | `/plan` ran the solver |
+| Modified — unsaved | At least one cell was regenerated since load |
+| Pre-flight blocked | Diagnostics returned 422; the solver was skipped |
+| Cost estimate — not saved | Produced by `/estimate-plan`; nothing was written to the database |
 
 ### Color suffixes
 

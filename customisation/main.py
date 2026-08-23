@@ -15,55 +15,34 @@ Called from app.py when st.session_state.view == "editor".
 """
 
 import streamlit as st
+
+from ui import theme as t
 from ui.api_client import MenuApiClient
+from ui.cards import card_header, inject_card_css
 from customisation.slot_editor import render_slot_editor
 from customisation.multi_slot_editor import render_multi_slot_editor
 from customisation.theme_editor import render_theme_editor
 
 _NEW_COUNTER_SENTINEL = "+ Add new counter"
 
-def _inject_editor_css():
-    st.markdown("""
+def inject_editor_css() -> None:
+    """Inject the editor page's chrome: the shared section-card styles
+    plus the page-header styles only this page uses."""
+    inject_card_css()
+    st.markdown(f"""
     <style>
-        .editor-header {
+        .editor-header {{
             display: flex; align-items: center; gap: 1rem;
             margin-bottom: 1.75rem;
-        }
-        .editor-title {
-            font-family: 'Fraunces', 'Iowan Old Style', Georgia, serif;
-            font-size: 1.7rem; font-weight: 600; color: #F7F1E6;
-            letter-spacing: -0.3px; margin: 0; line-height: 1.15;
-        }
-        .editor-subtitle {
-            font-size: 0.8rem; color: #9A8C77; margin: 0.15rem 0 0;
+        }}
+        .stApp p.editor-title {{
+            font-size: 1.5rem; font-weight: 600; color: {t.TEXT};
+            letter-spacing: -0.3px; margin: 0; line-height: 1.2;
+        }}
+        .stApp p.editor-subtitle {{
+            font-size: 0.875rem; color: {t.TEXT_3}; margin: 0.15rem 0 0;
             font-weight: 400;
-        }
-        .section-card {
-            background: #211B14; border: 1px solid #3A2F22;
-            border-radius: 14px; padding: 1.25rem 1.5rem;
-            margin-bottom: 1rem;
-        }
-        .section-title {
-            font-size: 1rem; font-weight: 700; color: #F7F1E6;
-            margin: 0 0 0.15rem; letter-spacing: -0.2px;
-        }
-        .section-desc {
-            font-size: 0.75rem; color: #9A8C77; margin: 0 0 1rem;
-        }
-        .status-pill {
-            display: inline-block; padding: 2px 8px;
-            border-radius: 99px; font-size: 0.68rem; font-weight: 600;
-        }
-        .status-pill.match { background: #14271C; color: #8FD6A6; }
-        .status-pill.new   { background: #2A2410; color: #E8C24A; }
-        .status-pill.warn  { background: #2A2410; color: #E8C24A; }
-        .changes-indicator {
-            display: inline-flex; align-items: center; gap: 0.35rem;
-            padding: 0.3rem 0.75rem; background: rgba(232,194,74,0.08);
-            border: 1px solid rgba(232,194,74,0.20); border-radius: 99px;
-            font-size: 0.75rem; color: #E8C24A; font-weight: 500;
-            margin-bottom: 0.75rem;
-        }
+        }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -75,44 +54,43 @@ def _render_client_settings(current: dict, client_key: str) -> dict:
     shares the same city, weekend calendar, cooldown window, and item
     source pools.
     """
-    st.markdown(
-        '<div class="section-card">'
-        '<p class="section-title">Client Settings</p>'
-        '<p class="section-desc">Shared by every counter for this client</p>',
-        unsafe_allow_html=True,
-    )
-    col_city, col_cooldown, col_weekend = st.columns([2, 1.4, 1.4])
-    with col_city:
-        city = st.text_input(
-            "City", value=current.get('city', ''),
-            key=f"editor_city_{client_key}",
-            placeholder="e.g. Bangalore",
-        ).strip()
-    with col_cooldown:
-        cooldown = st.number_input(
-            "Item cooldown (days)",
-            min_value=0, max_value=120,
-            value=int(current.get('item_cooldown_days') or 20),
-            step=1,
-            key=f"editor_cooldown_{client_key}",
-            help="An item served within this many days can't repeat.",
+    with st.container(border=True):
+        card_header(
+            "Client Settings",
+            "Shared by every counter for this client",
         )
-    with col_weekend:
-        serve_weekends = st.checkbox(
-            "Serve weekends",
-            value=bool(current.get('serve_weekends')),
-            key=f"editor_weekends_{client_key}",
-            help="When on, Sat/Sun count as service days and get their own "
-                 "day themes.",
+        col_city, col_cooldown, col_weekend = st.columns([2, 1.4, 1.4])
+        with col_city:
+            city = st.text_input(
+                "City", value=current.get('city', ''),
+                key=f"editor_city_{client_key}",
+                placeholder="e.g. Bangalore",
+            ).strip()
+        with col_cooldown:
+            cooldown = st.number_input(
+                "Item cooldown (days)",
+                min_value=0, max_value=120,
+                value=int(current.get('item_cooldown_days') or 20),
+                step=1,
+                key=f"editor_cooldown_{client_key}",
+                help="An item served within this many days can't repeat.",
+            )
+        with col_weekend:
+            serve_weekends = st.checkbox(
+                "Serve weekends",
+                value=bool(current.get('serve_weekends')),
+                key=f"editor_weekends_{client_key}",
+                help="When on, Sat/Sun count as service days and get their "
+                     "own day themes.",
+            )
+        pools_raw = st.text_input(
+            "Source pools (comma-separated)",
+            value=", ".join(current.get('source_pools') or []),
+            key=f"editor_pools_{client_key}",
+            help="Extra item collections this client may draw from, on top "
+                 "of the shared ontology. Leave empty for shared items only.",
         )
-    pools_raw = st.text_input(
-        "Source pools (comma-separated)",
-        value=", ".join(current.get('source_pools') or []),
-        key=f"editor_pools_{client_key}",
-        help="Extra item collections this client may draw from, on top of "
-             "the shared ontology. Leave empty for shared items only.",
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
+
     return {
         'city': city,
         'item_cooldown_days': int(cooldown),
@@ -125,7 +103,7 @@ def _render_client_settings(current: dict, client_key: str) -> dict:
 
 def render_customisation_editor(api: MenuApiClient):
     """Main entry point for the customisation editor view."""
-    _inject_editor_css()
+    inject_editor_css()
 
     # --- Top bar ---
     col_back, col_title = st.columns([1, 5])
@@ -276,7 +254,7 @@ def render_customisation_editor(api: MenuApiClient):
     else:
         if not new_client_name.strip():
             st.markdown(
-                '<div style="text-align:center;padding:2rem;color:#52525b;">'
+                f'<div style="text-align:center;padding:2rem;color:{t.TEXT_3};">'
                 'Enter a client name above to start configuring.</div>',
                 unsafe_allow_html=True,
             )

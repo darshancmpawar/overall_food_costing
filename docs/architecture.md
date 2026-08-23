@@ -2,8 +2,9 @@
 
 ```mermaid
 graph TD
-    subgraph UI ["Streamlit (app.py, customisation/, user_authentication/)"]
-        MP[Menu Planner]
+    subgraph UI ["Streamlit (app.py, ui/, customisation/, user_authentication/)"]
+        MP[Menu Planner — existing client]
+        EST[Cost Estimator — new client]
         CE[Customisation Editor]
         AU[Login / User Admin]
     end
@@ -11,6 +12,7 @@ graph TD
     subgraph API ["Flask API (api/app.py)"]
         AUTH[/auth/login/]
         PLAN[/plan/]
+        EPLAN[/estimate-plan/]
         REGEN[/regenerate/]
         SAVE[/save/]
         CONFIG[/client-config/]
@@ -43,7 +45,8 @@ graph TD
 
 | Layer | Location | Responsibility |
 |---|---|---|
-| Frontend | `app.py`, `customisation/`, `user_authentication/`, `ui/` | Streamlit views, login form, API client |
+| Frontend | `app.py`, `customisation/`, `user_authentication/`, `ui/` | Streamlit views, planner modes, costing panels, login form, API client |
+| Theme | `ui/theme.py`, `ui/styles.py`, `ui/cards.py`, `.streamlit/config.toml` | Pulse / OP Lens design tokens, the stylesheet that mirrors them, shared card chrome, and Streamlit's own widget theme |
 | API | `api/app.py`, `api/auth.py`, `api/concurrency.py`, `api/logging_config.py`, `api/metrics.py` | REST surface, bearer-token auth, concurrent-solve gate, structured logging, in-process counters |
 | Solver | `src/solver/` | CP-SAT model, multi-restart strategy, regeneration, solution formatting |
 | Rules | `src/menu_rules/` | Hard/soft/pre-filter constraints, loaded from JSON |
@@ -62,6 +65,28 @@ graph TD
 - **Dynamic worker allocation:** `api/concurrency.py` caps concurrent solves (`MAX_RUNNING=2`) and tunes CP-SAT worker count to RAM (1 active → 9 workers, 2 active → 5 each).
 - **History split:** `menu_history` is day-level (one row per `(client, date)` whose `menu` jsonb nests each counter's `{slot: item}` map), `week_signatures` is week-level (a deterministic `|`-delimited hash of a saved week, prefixed with its counter). The former drives item cooldown; the latter drives week-signature cooldown. `HistoryManager.expand_menu_rows()` flattens the jsonb back into the long `(date, slot, item_base, counter_name)` frame the cooldown rules are written against, so the storage shape and the in-memory shape can differ without either side caring.
 - **Counters:** a client's serving lines live in `clients.counters` (jsonb), each with its own `categories`, `slot_counts`, and `theme_map`. The solver plans one counter at a time — `ClientConfig` projects the selected counter's slots/themes onto the same fields the engine has always read, so counters are a config-layer concept the solver never has to know about. Cooldowns and saved history are scoped per counter, since three lines sharing one cooldown window would exhaust the item pools three times as fast.
+- **Two planner modes, one pipeline:** the planner runs either against a
+  stored client or as the **Cost Estimator** for a prospective one. The
+  estimator's menu shape is built by `build_adhoc_client_config()` from the
+  request body instead of a `clients` row, and its history is empty — but
+  from `SolverInputs` onward the two share the same diagnostics, admission
+  control, solver, cost enrichment and response shape
+  (`_plan_pipeline` / `_regenerate_pipeline`). Only the way the inputs are
+  assembled differs, so a change to the plan pipeline can't silently apply
+  to one mode and not the other.
+- **Estimates touch no storage:** `/estimate-plan` performs no Supabase read
+  or write. A prospective client has no row to read, no history to ban
+  against, and — critically — must not leave a half-created client behind
+  when a deal doesn't close. That also means the estimator keeps working
+  against an empty or unreachable database, which is why
+  `/editor-metadata` degrades to an empty client list rather than 500ing.
+- **Design tokens in one module:** `ui/theme.py` holds the palette as Python
+  constants; `ui/styles.py` projects them into CSS custom properties and
+  every inline `style="…"` string imports them. Streamlit's own widget
+  internals (radio dots, slider track, multiselect chips) are themed via
+  `.streamlit/config.toml`, whose `primaryColor` is the interaction blue —
+  the brand yellow stays reserved for the single primary action button per
+  screen, which the stylesheet paints explicitly.
 - **Optimistic concurrency:** the `clients` table carries a `version` column. `GET /client-config` returns it as an ETag; `PUT` must send it back, mismatch returns 409 so two admins editing the same client can't last-write-wins. Because every counter now lives in one row, that check also serialises edits to *different* counters of the same client.
 
 ## Key flows
@@ -145,6 +170,28 @@ The Streamlit UI catches `RuleDiagnosticsBlockedError` (the 422 path) and render
 The Streamlit **Generate Menu Plan** button is deterministic for already-saved dates: it first hits `GET /api/v1/saved-plan?client_name&start_date&num_days`. If every requested weekday has saved rows, the response carries `exists: true` and the UI renders that saved plan with a "Loaded from history" badge. Otherwise (`exists: false`) the UI falls back to `POST /api/v1/plan` and runs the solver as usual.
 
 `/saved-plan` is a pure read — it never invokes the solver. Color suffixes are re-attached server-side from the Excel ontology so the UI's renderer doesn't need a separate code path for saved vs fresh plans.
+
+### Cost Estimator (new client)
+
+```mermaid
+sequenceDiagram
+    participant U as Operator
+    participant S as Streamlit (estimate mode)
+    participant F as Flask
+    participant M as MenuSolver
+
+    U->>S: name + categories + counts + themes
+    U->>S: Generate Menu
+    S->>F: POST /api/v1/estimate-plan (config inline)
+    F->>F: build_adhoc_client_config() — no Supabase
+    F->>F: pre-flight diagnostics (empty history)
+    F->>M: pools + ad-hoc config + generic rules
+    M-->>F: week_plan
+    F->>F: enrich_solution_with_costs()
+    F-->>S: { solution, estimate: true, rule_diagnostics }
+    S->>U: plan table + cost footer + costing panel
+    Note over S,F: nothing written to clients / menu_history
+```
 
 ### Regenerate
 

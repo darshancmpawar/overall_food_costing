@@ -3,7 +3,10 @@ Flask API Application for Menu Planning System.
 
 Endpoints:
   POST /api/v1/plan — Generate a menu plan for a client
+  POST /api/v1/estimate-plan — Generate a plan for a prospective client
+        described inline (Cost Estimator); never touches the database
   POST /api/v1/regenerate — Regenerate selected cells
+  POST /api/v1/estimate-regenerate — Regenerate cells of an estimate
   POST /api/v1/save — Save plan to history
   GET  /api/v1/clients — List available clients
   GET  /api/v1/health — Health check
@@ -49,11 +52,12 @@ from src.preprocessor import ExcelReader, DataCleanser
 from src.preprocessor.pool_builder import PoolBuilder, _base_slot
 from src.constants import (
     ALL_DAY_NAMES, BASE_SLOT_NAMES, CONST_SLOTS, DEFAULT_COUNTER_NAME,
-    DEFAULT_ITEM_COOLDOWN_DAYS, REPEATABLE_ITEM_BASES, WEEKDAY_NAMES,
+    DEFAULT_ITEM_COOLDOWN_DAYS, REPEATABLE_ITEM_BASES, REQUIRED_POOL_SLOTS,
+    WEEKDAY_NAMES,
 )
 # UnknownCounterError is a ValueError subclass, so the existing 400/404
 # handlers pick it up without a dedicated except branch.
-from src.client import ClientConfigLoader
+from src.client import build_adhoc_client_config, ClientConfigLoader
 from src.client.client_config import DEFAULT_THEME_MAP, AVAILABLE_THEMES  # noqa: F401 — surfaced in editor-metadata response
 from src.history import HistoryManager
 from src.menu_rules import MenuRuleLoader
@@ -527,16 +531,9 @@ def _prepare_solver_inputs(data: Dict[str, Any]) -> SolverInputs:
     client_name = data.get('client_name')
     _require_known_client(client_name)
 
-    start_date_str = data.get('start_date')
-    num_days = max(MIN_NUM_DAYS, min(MAX_NUM_DAYS, int(data.get('num_days', 5))))
-    time_limit = max(
-        MIN_TIME_LIMIT_SECONDS,
-        min(MAX_TIME_LIMIT_SECONDS, int(data.get('time_limit_seconds', 240))),
-    )
-
     client_cfg = _request_client_config(client_name, _requested_counter(data))
     df, pools = _get_menu_data(client_cfg.source_pools)
-    start_date = dt.date.fromisoformat(start_date_str) if start_date_str else today_in_app_tz()
+    start_date, num_days, time_limit = _parse_plan_window(data)
     weekday_dates = _weekdays_from(
         start_date, num_days, serve_weekends=client_cfg.serve_weekends,
     )
@@ -566,6 +563,90 @@ def _prepare_solver_inputs(data: Dict[str, Any]) -> SolverInputs:
         banned=banned,
         rb_ban=rb_ban,
         recent_sigs=recent_sigs,
+        cfg=cfg,
+        counter_name=client_cfg.counter_name,
+    )
+
+
+def _parse_plan_window(data: Dict[str, Any]):
+    """Return ``(start_date, num_days, time_limit)`` clamped to the API's
+    limits. Shared by the stored-client and estimator request paths so both
+    honour the same MIN/MAX bounds and the same timezone default."""
+    num_days = max(MIN_NUM_DAYS, min(MAX_NUM_DAYS, int(data.get('num_days', 5))))
+    time_limit = max(
+        MIN_TIME_LIMIT_SECONDS,
+        min(MAX_TIME_LIMIT_SECONDS, int(data.get('time_limit_seconds', 240))),
+    )
+    start_date_str = data.get('start_date')
+    start_date = (
+        dt.date.fromisoformat(start_date_str) if start_date_str
+        else today_in_app_tz()
+    )
+    return start_date, num_days, time_limit
+
+
+def _prepare_estimate_inputs(data: Dict[str, Any]) -> SolverInputs:
+    """Assemble solver inputs for the **Cost Estimator** — a prospective
+    client described inline, with no ``clients`` row and no history.
+
+    Differences from :func:`_prepare_solver_inputs`, all deliberate:
+
+    * The menu shape comes from the request body (``categories``,
+      ``slot_counts``, ``theme_map``) via
+      :func:`build_adhoc_client_config`, so nothing is read from — or
+      written to — Supabase. An estimate for a client that doesn't exist
+      yet must not leave a row behind.
+    * History is empty: there is no served history for a prospective
+      client, so the item-cooldown, rice-bread-gap and week-signature
+      rules have nothing to ban. They stay in the rule list (harmless
+      no-ops) rather than being filtered out, so the estimate runs through
+      exactly the same rule pipeline a real plan does.
+    * Per-client rules from ``client_rules.json`` are **not** applied: the
+      name is free text an operator just typed, and matching it against
+      the file would silently apply another client's bans to an unrelated
+      estimate.
+
+    Raises ``ValueError`` with a user-facing message on invalid input.
+    """
+    client_cfg = build_adhoc_client_config(
+        data.get('client_name'),
+        data.get('categories'),
+        data.get('slot_counts'),
+        data.get('theme_map'),
+        serve_weekends=bool(data.get('serve_weekends')),
+        source_pools=data.get('source_pools'),
+    )
+    df, pools = _get_menu_data(client_cfg.source_pools)
+    start_date, num_days, time_limit = _parse_plan_window(data)
+    weekday_dates = _weekdays_from(
+        start_date, num_days, serve_weekends=client_cfg.serve_weekends,
+    )
+    # Generic rules only, and the shared list is passed through untouched
+    # (no cooldown override) so concurrent requests can't see each other's
+    # edits to these process-wide rule objects.
+    rules = list(_get_menu_rules())
+    skip_cells = set()
+    for rule in rules:
+        if hasattr(rule, 'compute_skip_cells'):
+            skip_cells |= rule.compute_skip_cells(weekday_dates)
+    cfg = _build_solver_config(
+        df, client_cfg, start_date, num_days, time_limit, weekday_dates,
+    )
+
+    return SolverInputs(
+        client_name=client_cfg.name,
+        client_cfg=client_cfg,
+        df=df,
+        pools=pools,
+        start_date=start_date,
+        num_days=num_days,
+        time_limit=time_limit,
+        weekday_dates=weekday_dates,
+        rules=rules,
+        skip_cells=skip_cells,
+        banned={},
+        rb_ban={},
+        recent_sigs=set(),
         cfg=cfg,
         counter_name=client_cfg.counter_name,
     )
@@ -641,89 +722,116 @@ def list_clients():
         return _internal_error_response(500)
 
 
-@app.route('/api/v1/plan', methods=['POST'])
-@rate_limit("plan")
-def plan_menu():
-    try:
-        inputs = _prepare_solver_inputs(request.get_json() or {})
+def _plan_pipeline(inputs: SolverInputs, extra: Optional[Dict[str, Any]] = None):
+    """Pre-flight gate → solver → cost enrichment → response body.
 
-        # Pre-flight gate: run every rule's diagnose() against the
-        # assembled inputs. If any diagnostic is severity=error, the
-        # solver would (with overwhelming probability) fail — so we
-        # short-circuit with 422 and the structured diagnostics
-        # before spending solver budget.
-        diagnostics, summary = _run_preflight(inputs)
-        _record_diag_metrics(diagnostics)
-        diag_dicts = [d.to_dict() for d in diagnostics]
-        # Denormalised pool_warnings projection kept for one release so
-        # older Streamlit builds that still read this key keep rendering
-        # something. New code consumes ``rule_diagnostics``.
-        pool_warnings = pool_warnings_projection(diagnostics)
+    Shared by ``/plan`` and ``/estimate-plan``: both run the identical
+    diagnostics, admission control, solve and costing steps, and differ
+    only in how their ``SolverInputs`` was assembled (stored client vs.
+    inline estimator config) and in the ``extra`` keys merged into the
+    response. Returns a ``(body, status)`` tuple, or raises for the
+    caller's error handler.
+    """
+    # Pre-flight gate: run every rule's diagnose() against the
+    # assembled inputs. If any diagnostic is severity=error, the
+    # solver would (with overwhelming probability) fail — so we
+    # short-circuit with 422 and the structured diagnostics
+    # before spending solver budget.
+    diagnostics, summary = _run_preflight(inputs)
+    _record_diag_metrics(diagnostics)
+    diag_dicts = [d.to_dict() for d in diagnostics]
+    # Denormalised pool_warnings projection kept for one release so
+    # older Streamlit builds that still read this key keep rendering
+    # something. New code consumes ``rule_diagnostics``.
+    pool_warnings = pool_warnings_projection(diagnostics)
 
-        if has_blocking_errors(diagnostics):
-            metrics.incr('plan_requests_total', outcome='preflight_blocked')
-            body = {
-                'success': False,
-                'error': 'rule_diagnostics_blocked',
-                'message': (
-                    f"Pre-flight diagnostics found "
-                    f"{summary['errors']} blocking issue"
-                    f"{'s' if summary['errors'] != 1 else ''} for "
-                    f"{inputs.client_name}; solver skipped."
-                ),
-                'rule_diagnostics': diag_dicts,
-                'summary': summary,
-            }
-            if pool_warnings:
-                body['pool_warnings'] = pool_warnings
-            return jsonify(body), 422
-
-        # Weighted admission control — sized by plan length so short plans
-        # don't queue behind heavy ones.
-        with solver_slot(inputs.cfg.days) as admitted:
-            if not admitted:
-                return jsonify({
-                    'success': False,
-                    'error': 'Solver busy — too many concurrent requests. Retry shortly.',
-                }), 503
-
-            solver = MenuSolver(
-                pools=inputs.pools,
-                solver_config=inputs.cfg,
-                menu_rules=inputs.rules,
-                banned_by_date=inputs.banned,
-                ricebread_ban_day=inputs.rb_ban,
-                recent_sigs=inputs.recent_sigs,
-                skip_cells=inputs.skip_cells,
-            )
-
-            week_plan, plan_dates = solver.solve()
-
-        formatter = SolutionFormatter(
-            week_plan, plan_dates, theme_map=inputs.client_cfg.theme_map or None,
-        )
-        from src.cost.calculator import enrich_solution_with_costs
-        solution = enrich_solution_with_costs(formatter.to_dict(), _get_cost_lookup())
-        response = {
-            'success': True,
+    if has_blocking_errors(diagnostics):
+        body = {
+            'success': False,
+            'error': 'rule_diagnostics_blocked',
             'message': (
-                f'Menu plan generated for {inputs.client_name} '
-                f'({inputs.counter_name})'
+                f"Pre-flight diagnostics found "
+                f"{summary['errors']} blocking issue"
+                f"{'s' if summary['errors'] != 1 else ''} for "
+                f"{inputs.client_name}; solver skipped."
             ),
-            'solution': solution,
-            'counter': inputs.counter_name,
-            'counters': inputs.client_cfg.counter_names,
             'rule_diagnostics': diag_dicts,
             'summary': summary,
         }
         if pool_warnings:
-            response['pool_warnings'] = pool_warnings
-        if solver.rule_failures:
-            response['rule_warnings'] = solver.rule_failures
-            _count_rule_failures(solver.rule_failures)
-        metrics.incr('plan_requests_total', outcome='success')
-        return jsonify(response)
+            body['pool_warnings'] = pool_warnings
+        return body, 422
 
+    # Weighted admission control — sized by plan length so short plans
+    # don't queue behind heavy ones.
+    with solver_slot(inputs.cfg.days) as admitted:
+        if not admitted:
+            return {
+                'success': False,
+                'error': 'Solver busy — too many concurrent requests. Retry shortly.',
+            }, 503
+
+        solver = MenuSolver(
+            pools=inputs.pools,
+            solver_config=inputs.cfg,
+            menu_rules=inputs.rules,
+            banned_by_date=inputs.banned,
+            ricebread_ban_day=inputs.rb_ban,
+            recent_sigs=inputs.recent_sigs,
+            skip_cells=inputs.skip_cells,
+        )
+
+        week_plan, plan_dates = solver.solve()
+
+    response = {
+        'success': True,
+        'message': (
+            f'Menu plan generated for {inputs.client_name} '
+            f'({inputs.counter_name})'
+        ),
+        'solution': _format_and_cost(inputs, week_plan, plan_dates),
+        'counter': inputs.counter_name,
+        'counters': inputs.client_cfg.counter_names,
+        'rule_diagnostics': diag_dicts,
+        'summary': summary,
+    }
+    if pool_warnings:
+        response['pool_warnings'] = pool_warnings
+    if solver.rule_failures:
+        response['rule_warnings'] = solver.rule_failures
+        _count_rule_failures(solver.rule_failures)
+    if extra:
+        response.update(extra)
+    return response, 200
+
+
+def _format_and_cost(inputs: SolverInputs, week_plan, plan_dates) -> Dict[str, Any]:
+    """Format a solved week and attach per-item / per-day cost fields."""
+    from src.cost.calculator import enrich_solution_with_costs
+
+    formatter = SolutionFormatter(
+        week_plan, plan_dates, theme_map=inputs.client_cfg.theme_map or None,
+    )
+    return enrich_solution_with_costs(formatter.to_dict(), _get_cost_lookup())
+
+
+def _plan_endpoint(prepare, *, metric: str,
+                   extra: Optional[Dict[str, Any]] = None):
+    """Run a plan request end to end with the shared error contract.
+
+    *prepare* is a zero-arg callable returning ``SolverInputs`` — that's
+    the only difference between the stored-client and estimator surfaces.
+    *metric* names the ``…_requests_total`` counter to label with the
+    outcome, so /plan and /estimate-plan stay separately observable.
+    """
+    try:
+        inputs = prepare()
+        body, status = _plan_pipeline(inputs, extra)
+        if status == 422:
+            metrics.incr(metric, outcome='preflight_blocked')
+        elif status == 200:
+            metrics.incr(metric, outcome='success')
+        return jsonify(body), status
     except (ValueError, KeyError) as e:
         return jsonify({'success': False, 'error': str(e)}), 400
     except RuntimeError as e:
@@ -731,7 +839,7 @@ def plan_menu():
         # Counts infeasibility + exhausted-restarts from the CP-SAT path;
         # this is the SLO-relevant failure mode (vs 4xx, which is caller
         # input error).
-        metrics.incr('plan_requests_total', outcome='solver_error')
+        metrics.incr(metric, outcome='solver_error')
         metrics.incr('solver_failures_total')
         return jsonify({'success': False, 'error': str(e)}), 500
     except (FileNotFoundError, OSError) as e:
@@ -742,74 +850,121 @@ def plan_menu():
         return _internal_error_response(500)
 
 
-@app.route('/api/v1/regenerate', methods=['POST'])
-@rate_limit("regenerate")
-def regenerate_cells():
+@app.route('/api/v1/plan', methods=['POST'])
+@rate_limit("plan")
+def plan_menu():
+    return _plan_endpoint(
+        lambda: _prepare_solver_inputs(request.get_json() or {}),
+        metric='plan_requests_total',
+    )
+
+
+@app.route('/api/v1/estimate-plan', methods=['POST'])
+@rate_limit("plan")
+def estimate_plan():
+    """Generate a plan for a **prospective** client described inline.
+
+    Same body as /plan except the client's menu shape is supplied
+    directly instead of being read from the ``clients`` table::
+
+        {
+          "client_name":  "Acme Corp",        # a label, not a lookup key
+          "categories":   ["rice", "bread", …],
+          "slot_counts":  {"veg_dry": 2},     # optional, default 1 each
+          "theme_map":    {"monday": "south"},# optional, defaults per day
+          "serve_weekends": false,            # optional
+          "start_date": "2026-09-01", "num_days": 5
+        }
+
+    Nothing is read from or written to the ``clients`` / ``menu_history``
+    tables, so an estimate can't create a half-configured client or
+    consume another client's cooldown history. The response mirrors /plan
+    (``solution`` carries the same cost enrichment the costing panel
+    reads) plus ``"estimate": true``.
+
+    Shares the ``plan`` rate-limit bucket with /plan on purpose: both
+    spend the same solver budget, so they should throttle together.
+    """
+    return _plan_endpoint(
+        lambda: _prepare_estimate_inputs(request.get_json() or {}),
+        metric='estimate_requests_total',
+        extra={'estimate': True},
+    )
+
+
+def _regenerate_pipeline(inputs: SolverInputs, data: Dict[str, Any],
+                         extra: Optional[Dict[str, Any]] = None):
+    """Lock every unselected cell and re-solve the selected ones.
+
+    Shared by ``/regenerate`` and ``/estimate-regenerate``; see
+    :func:`_plan_pipeline` for why the two surfaces only differ in how
+    their inputs were assembled.
+    """
+    base_plan = {
+        dt.date.fromisoformat(d_str): _items_from_day(slots)
+        for d_str, slots in (data.get('base_plan') or {}).items()
+    }
+    replace_mask = {
+        dt.date.fromisoformat(d_str): set(slot_list)
+        for d_str, slot_list in (data.get('replace_slots') or {}).items()
+    }
+
+    with solver_slot(inputs.cfg.days) as admitted:
+        if not admitted:
+            return {
+                'success': False,
+                'error': 'Solver busy — too many concurrent requests. Retry shortly.',
+            }, 503
+
+        regen = MenuRegenerator(
+            pools=inputs.pools,
+            df=inputs.df,
+            solver_config=inputs.cfg,
+            menu_rules=inputs.rules,
+            banned_by_date=inputs.banned,
+            ricebread_ban_day=inputs.rb_ban,
+            recent_sigs=inputs.recent_sigs,
+            skip_cells=inputs.skip_cells,
+        )
+
+        week_plan, plan_dates = regen.regenerate(base_plan, replace_mask)
+
+    response = {
+        'success': True,
+        'message': (
+            f'Regenerated {sum(len(v) for v in replace_mask.values())} '
+            f'cells for {inputs.client_name} ({inputs.counter_name})'
+        ),
+        'solution': _format_and_cost(inputs, week_plan, plan_dates),
+        'counter': inputs.counter_name,
+    }
+    if regen.rule_failures:
+        response['rule_warnings'] = regen.rule_failures
+        _count_rule_failures(regen.rule_failures)
+    if extra:
+        response.update(extra)
+    return response, 200
+
+
+def _regenerate_endpoint(prepare, *, metric: str,
+                         extra: Optional[Dict[str, Any]] = None):
+    """Run a regenerate request end to end with the shared error contract."""
     try:
         data = request.get_json() or {}
-        base_plan_raw = data.get('base_plan', {})
-        replace_slots_raw = data.get('replace_slots', {})
-        if not base_plan_raw:
+        if not data.get('base_plan'):
             return jsonify({'success': False, 'error': 'base_plan is required'}), 400
-        if not replace_slots_raw:
+        if not data.get('replace_slots'):
             return jsonify({'success': False, 'error': 'replace_slots is required'}), 400
 
-        inputs = _prepare_solver_inputs(data)
-
-        base_plan = {
-            dt.date.fromisoformat(d_str): _items_from_day(slots)
-            for d_str, slots in base_plan_raw.items()
-        }
-        replace_mask = {
-            dt.date.fromisoformat(d_str): set(slot_list)
-            for d_str, slot_list in replace_slots_raw.items()
-        }
-
-        with solver_slot(inputs.cfg.days) as admitted:
-            if not admitted:
-                return jsonify({
-                    'success': False,
-                    'error': 'Solver busy — too many concurrent requests. Retry shortly.',
-                }), 503
-
-            regen = MenuRegenerator(
-                pools=inputs.pools,
-                df=inputs.df,
-                solver_config=inputs.cfg,
-                menu_rules=inputs.rules,
-                banned_by_date=inputs.banned,
-                ricebread_ban_day=inputs.rb_ban,
-                recent_sigs=inputs.recent_sigs,
-                skip_cells=inputs.skip_cells,
-            )
-
-            week_plan, plan_dates = regen.regenerate(base_plan, replace_mask)
-
-        formatter = SolutionFormatter(
-            week_plan, plan_dates, theme_map=inputs.client_cfg.theme_map or None,
-        )
-        from src.cost.calculator import enrich_solution_with_costs
-        solution = enrich_solution_with_costs(formatter.to_dict(), _get_cost_lookup())
-        response = {
-            'success': True,
-            'message': (
-                f'Regenerated {sum(len(v) for v in replace_mask.values())} '
-                f'cells for {inputs.client_name} ({inputs.counter_name})'
-            ),
-            'solution': solution,
-            'counter': inputs.counter_name,
-        }
-        if regen.rule_failures:
-            response['rule_warnings'] = regen.rule_failures
-            _count_rule_failures(regen.rule_failures)
-        metrics.incr('regenerate_requests_total', outcome='success')
-        return jsonify(response)
-
+        body, status = _regenerate_pipeline(prepare(data), data, extra)
+        if status == 200:
+            metrics.incr(metric, outcome='success')
+        return jsonify(body), status
     except (ValueError, KeyError) as e:
         return jsonify({'success': False, 'error': str(e)}), 400
     except RuntimeError as e:
         logger.warning("Regeneration failed: %s", e)
-        metrics.incr('regenerate_requests_total', outcome='solver_error')
+        metrics.incr(metric, outcome='solver_error')
         metrics.incr('solver_failures_total')
         return jsonify({'success': False, 'error': str(e)}), 500
     except (FileNotFoundError, OSError) as e:
@@ -818,6 +973,31 @@ def regenerate_cells():
     except Exception as e:
         logger.error("Unexpected error in regenerate: %s", e, exc_info=True)
         return _internal_error_response(500)
+
+
+@app.route('/api/v1/regenerate', methods=['POST'])
+@rate_limit("regenerate")
+def regenerate_cells():
+    return _regenerate_endpoint(
+        _prepare_solver_inputs,
+        metric='regenerate_requests_total',
+    )
+
+
+@app.route('/api/v1/estimate-regenerate', methods=['POST'])
+@rate_limit("regenerate")
+def estimate_regenerate():
+    """Regenerate selected cells of a Cost Estimator plan.
+
+    Body is /estimate-plan's plus ``base_plan`` and ``replace_slots``:
+    the estimator config has to be re-sent because nothing about the
+    prospective client is persisted server-side.
+    """
+    return _regenerate_endpoint(
+        _prepare_estimate_inputs,
+        metric='estimate_regenerate_requests_total',
+        extra={'estimate': True},
+    )
 
 
 @app.route('/api/v1/save', methods=['POST'])
@@ -1042,17 +1222,37 @@ def saved_plan():
 
 @app.route('/api/v1/editor-metadata', methods=['GET'])
 def editor_metadata():
-    """Return metadata needed by the customisation editor UI."""
+    """Return metadata needed by the customisation editor UI.
+
+    Everything except ``clients`` is derived from ``src.constants``, so
+    the slot vocabulary and theme list are served even when Supabase is
+    unreachable — the Cost Estimator only needs those, and it would be
+    perverse for pricing a *prospective* client to fail because the
+    existing-client list couldn't be read. A failed lookup logs and
+    yields an empty ``clients`` list rather than a 500.
+    """
     try:
+        try:
+            clients = _request_client_names()
+        except Exception as e:  # noqa: BLE001 — degrade, don't fail the page
+            logger.warning(
+                "Editor metadata: client list unavailable (%s); "
+                "serving the slot/theme vocabulary only.", e,
+            )
+            clients = []
         return jsonify({
             'success': True,
             'base_slot_names': list(BASE_SLOT_NAMES),
             'const_slots': list(CONST_SLOTS),
+            # Slots the ontology must be able to fill for any client.
+            # The Cost Estimator starts from these so a fresh setup
+            # can't open with niche opt-in slots whose pools are empty.
+            'required_pool_slots': list(REQUIRED_POOL_SLOTS),
             'default_theme_map': DEFAULT_THEME_MAP,
             'available_themes': AVAILABLE_THEMES,
             'weekday_names': list(WEEKDAY_NAMES),
             'all_day_names': list(ALL_DAY_NAMES),
-            'clients': _request_client_names(),
+            'clients': clients,
         })
     except Exception as e:
         logger.error("Failed to load editor metadata: %s", e, exc_info=True)

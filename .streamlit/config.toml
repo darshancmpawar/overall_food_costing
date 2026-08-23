@@ -1,0 +1,29 @@
+# Streamlit's own theme, aligned with the Pulse / OP Lens design system.
+#
+# This covers the widget internals CSS can't reliably reach — the radio
+# and checkbox active dot, the slider track, multiselect chips, focus
+# rings — so they pick up brand blue rather than Streamlit's default red.
+# ui/styles.py handles everything else.
+#
+# primaryColor is BLUE, not the brand yellow, on purpose: in this design
+# system blue is the interaction / selection colour ("checkboxes and
+# radio buttons with blue active state") while yellow is reserved for the
+# one primary action button per screen, which ui/styles.py styles
+# explicitly. Setting primaryColor to yellow would tint every selection
+# control with a hue that fails contrast on white.
+[theme]
+# backgroundColor is WHITE and secondaryBackgroundColor the light grey,
+# which looks inverted next to the design guide until you know why:
+# Streamlit paints its own surfaces (modals, containers) from
+# backgroundColor, and those are the guide's white "card / panel". The
+# grey page canvas is painted by `.stApp` in ui/styles.py instead, which
+# sits behind them. Setting backgroundColor to the grey instead makes
+# every dialog grey and no CSS override reliably reaches it.
+base = "light"
+primaryColor = "#0D6EFD"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F5F5"
+textColor = "#131313"
+
+[browser]
+gatherUsageStats = false
