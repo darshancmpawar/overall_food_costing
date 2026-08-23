@@ -103,6 +103,17 @@ STYLES = f"""
     button, input, textarea, select, table, th, td {{
         font-family: var(--font-body) !important;
     }}
+    /* …but NOT Streamlit's material icons. Their glyphs *are* the font:
+       each one's text content is a ligature name, so overriding the
+       family renders the literal string "keyboard_double_arrow_left"
+       where the collapse arrow should be. They carry emotion classes,
+       so the rule above catches them unless they're excluded here. */
+    [data-testid="stIconMaterial"],
+    [class*="material-symbols"], [class*="material-icons"],
+    .material-icons, .material-symbols-rounded {{
+        font-family: 'Material Symbols Rounded', 'Material Symbols Outlined',
+                     'Material Icons Rounded', 'Material Icons' !important;
+    }}
     [data-testid="stMarkdownContainer"] p {{
         color: var(--text-2);
         font-weight: 400;
@@ -226,27 +237,62 @@ STYLES = f"""
         border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
         padding: 0.5rem 0.7rem; margin: 0.15rem 0 0.9rem;
     }}
+    /* The switch's off state — names the mode you are actually in, so
+       the panel reads the same either way round. */
+    .stApp p.mode-active {{
+        font-size: 0.72rem; font-weight: 600; letter-spacing: 0.02em;
+        color: rgba(255,255,255,0.7);
+        margin: 0.1rem 0 0.9rem;
+    }}
 
-    .user-chip {{
-        display: flex; align-items: center; gap: 0.6rem;
-        padding: 0.6rem 0.7rem; background: rgba(255,255,255,0.08);
-        border: 1px solid rgba(255,255,255,0.16); border-radius: var(--radius-md);
-        margin-bottom: 0.75rem;
+    /* --- MODE SWITCH (st.toggle on the deep-blue nav panel) ---
+       ``st.toggle`` renders as a hidden ``input[role="switch"]`` followed
+       by two anonymous divs — the track, and the knob inside it — so the
+       track is addressed as "the div right after the input's span" and
+       the checked state through ``:has(input:checked)``. Scoped with
+       ``:has(input[role="switch"])`` so it can never catch a plain
+       checkbox, whose markup is a different shape.
+
+       The label is sentence case, not the uppercase treatment the
+       sidebar gives input labels: this is a control, not a field
+       heading. Its ON accent is the brand yellow rather than the
+       interaction blue used elsewhere — brand blue on the navy panel has
+       almost no contrast, and yellow is already the sidebar's accent
+       (the slider uses it for the same reason). */
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] label {{
+        text-transform: none !important;
+        letter-spacing: 0 !important;
+        font-size: 0.86rem !important;
+        font-weight: 500 !important;
     }}
-    .user-avatar {{
-        width: 32px; height: 32px; border-radius: 50%;
-        background: var(--yellow);
-        display: flex; align-items: center; justify-content: center;
-        font-size: 0.74rem; font-weight: 700; color: var(--text); flex-shrink: 0;
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] label p {{
+        color: rgba(255,255,255,0.92) !important;
+        font-size: 0.86rem !important;
+        font-weight: 500 !important;
     }}
-    .user-chip-info {{ flex: 1; min-width: 0; }}
-    .user-chip-name {{
-        font-size: 0.85rem; font-weight: 600; color: var(--text-invert);
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    /* Track, off — visible against the navy panel. */
+    [data-testid="stSidebar"] [data-testid="stCheckbox"]:has(input[role="switch"])
+    label > span + div {{
+        background: rgba(255,255,255,0.30) !important;
     }}
-    .user-chip-role {{
-        font-size: 0.66rem; color: rgba(255,255,255,0.62);
-        text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
+    /* Knob, off */
+    [data-testid="stSidebar"] [data-testid="stCheckbox"]:has(input[role="switch"])
+    label > span + div > div {{
+        background: var(--text-invert) !important;
+    }}
+    /* Track + knob, on — brand yellow with a dark knob, the same pairing
+       as the primary button, so "switched on" reads as the accent. */
+    [data-testid="stSidebar"] [data-testid="stCheckbox"]:has(input[role="switch"])
+    label:has(input:checked) > span + div {{
+        background: var(--yellow) !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stCheckbox"]:has(input[role="switch"])
+    label:has(input:checked) > span + div > div {{
+        background: var(--nav-deep) !important;
+    }}
+    /* The help "?" sits next to the label on the dark panel. */
+    [data-testid="stSidebar"] [data-testid="stTooltipIcon"] svg {{
+        stroke: rgba(255,255,255,0.6) !important;
     }}
 
     /* ================================================================

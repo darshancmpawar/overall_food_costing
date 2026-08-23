@@ -253,7 +253,9 @@ _SESSION_DEFAULTS = {
     # Per-item and per-day cost data extracted from the enriched API
     # solution. Empty dict when the Excel has no cost columns.
     "cost_data": {},
-    # Which planner mode is active — see MODE_* above.
+    # Planner mode. ``estimator_mode`` is the sidebar switch's own
+    # boolean state; ``app_mode`` is the string form derived from it.
+    "estimator_mode": False,
     "app_mode": MODE_EXISTING,
     # The estimator setup the on-screen plan was generated from. Kept so
     # Regenerate can re-send it (the server stores nothing about a
@@ -293,16 +295,22 @@ with st.sidebar:
 
     # Mode switch comes first: it decides whether the controls below are
     # a client picker or nothing at all (the estimator's setup lives on
-    # the page, where it has room for four editors).
+    # the page, where it has room for four editors). A switch rather than
+    # a radio pair — there are exactly two modes, one of which is the
+    # everyday default, which is what a toggle says and a radio doesn't.
     st.markdown('<p class="mode-switch-label">Mode</p>', unsafe_allow_html=True)
-    app_mode = st.radio(
-        "Mode",
-        [MODE_EXISTING, MODE_ESTIMATE],
-        format_func=lambda m: _MODE_LABELS[m],
-        key="app_mode",
-        label_visibility="collapsed",
+    is_estimate_mode = st.toggle(
+        _MODE_LABELS[MODE_ESTIMATE],
+        key="estimator_mode",
+        help="Off: plan for a client configured in the database. "
+             "On: price a prospective client from an ad-hoc setup — "
+             "nothing is saved.",
     )
-    is_estimate_mode = (app_mode == MODE_ESTIMATE)
+    # Keep the string form in session for anything that reads the mode
+    # rather than the switch position.
+    st.session_state.app_mode = (
+        MODE_ESTIMATE if is_estimate_mode else MODE_EXISTING
+    )
 
     selected_client = None
     selected_counter = None
@@ -315,6 +323,14 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
     else:
+        # Spell out which mode the switch's off position means — next
+        # to a bolder "Cost Estimator" label, a bare mode name reads
+        # ambiguously.
+        st.markdown(
+            f'<p class="mode-active">Off &middot; planning for an '
+            f'{_MODE_LABELS[MODE_EXISTING].lower()}</p>',
+            unsafe_allow_html=True,
+        )
         try:
             clients_list = _cached_list_clients(client)
         except (ConnectionError, OSError, ValueError):
