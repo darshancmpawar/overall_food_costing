@@ -9,24 +9,38 @@ and wires up the two-way percentage <-> rupee inputs (same pattern as the
 vendor tab: percentage is the source of truth, callbacks keep the partner
 field in sync, and a changed selling amount re-derives every rupee value).
 
+The selling price is set either way round — as a markup over the overall
+cost, or as a price per plate — because a deal is often discussed as a
+round number per head rather than as a percentage. The two inputs are one
+number with two faces, kept in step by the same callback pattern.
+
+Profit also picks up SmartQ's share of the plate from the vendor tab
+(``vc_smartq_share_pct``): the part of the buying price the vendor doesn't
+need. It is a margin, so it is credited to profit rather than netted off
+the cost lines.
+
 Session-state keys are prefixed ``sq_``.
 """
 
 import streamlit as st
 
 from src.cost.smartq_cost import (
+    DEFAULT_SELLING_MARKUP_PCT,
+    MIN_MARKUP_PCT,
     DEFAULT_SELLING_PAX,
     DEFAULT_WORKING_DAYS,
     SMARTQ_COST_LINES,
     buying_amount,
     line_abs,
     line_pct,
+    markup_pct_from_price,
     selling_amount,
     selling_price,
     smartq_cost,
     smartq_profit,
     smartq_profit_pct,
 )
+from src.cost.vendor_cost import share_amount
 from ui import theme
 
 
@@ -51,14 +65,35 @@ def _cadence_badge(cadence: str) -> str:
     )
 
 
+def _current_selling_price() -> float:
+    """Selling price per plate implied by the markup currently in session."""
+    ss = st.session_state
+    return selling_price(
+        ss.get("sq_overall_per_plate", 0.0),
+        ss.get("sq_markup_pct", DEFAULT_SELLING_MARKUP_PCT),
+    )
+
+
 def _current_selling_amount() -> float:
     """Selling amount from the current session inputs — safe to call inside a
     widget callback, which runs before the script reruns."""
     ss = st.session_state
-    overall = ss.get("sq_overall_per_plate", 0.0)
     pax = ss.get("sq_selling_pax", DEFAULT_SELLING_PAX)
     days = ss.get("sq_working_days", DEFAULT_WORKING_DAYS)
-    return selling_amount(selling_price(overall), pax, days)
+    return selling_amount(_current_selling_price(), pax, days)
+
+
+def _on_markup_change() -> None:
+    """Markup edited: re-derive the price per plate."""
+    st.session_state.sq_selling_price = round(_current_selling_price(), 2)
+
+
+def _on_price_change() -> None:
+    """Price per plate edited: back out the markup it implies."""
+    ss = st.session_state
+    ss.sq_markup_pct = markup_pct_from_price(
+        ss.sq_selling_price, ss.get("sq_overall_per_plate", 0.0),
+    )
 
 
 def _on_pct_change(key: str, divisor: int) -> None:
@@ -83,8 +118,16 @@ def _seed_state(overall_per_plate: float) -> None:
     if "sq_working_days" not in ss:
         ss.sq_working_days = DEFAULT_WORKING_DAYS
         ss.sq_selling_pax = DEFAULT_SELLING_PAX
+        ss.sq_markup_pct = DEFAULT_SELLING_MARKUP_PCT
         for key, _label, default, _cadence, _divisor in SMARTQ_COST_LINES:
             ss[f"sq_{key}_pct"] = default
+
+    # The overall cost moves whenever the vendor tab's food share does, so
+    # the price is re-derived from the (unchanged) markup — the markup is
+    # the anchor, the price is the view of it.
+    if ss.get("sq_seed_overall") != overall_per_plate:
+        ss.sq_seed_overall = overall_per_plate
+        ss.sq_selling_price = round(_current_selling_price(), 2)
 
     sell_amt = _current_selling_amount()
     if ss.get("sq_seed_selling_amount") != sell_amt:
@@ -106,22 +149,46 @@ def render_smartq_cost(overall_per_plate: float) -> None:
 
     _seed_state(overall_per_plate)
 
-    sell_price = selling_price(overall_per_plate)
-
     st.caption(
-        "Selling price is set 30% above the overall cost per plate. Enter the "
-        "working days and pax/day to scale up to period totals; each operating "
-        "line below is a share of the selling amount."
+        "Set the selling price either as a markup over the overall cost per "
+        "plate or as the price itself — the two stay in step. Working days "
+        "and pax/day scale it to period totals; each operating line below is "
+        "a share of the selling amount."
     )
 
-    in1, in2 = st.columns(2)
-    in1.number_input("Working days", key="sq_working_days", min_value=1, step=1)
-    in2.number_input("Selling Pax / day", key="sq_selling_pax", min_value=1, step=1)
+    in1, in2, in3, in4 = st.columns(4)
+    in1.number_input(
+        "Markup %", key="sq_markup_pct",
+        min_value=MIN_MARKUP_PCT, step=1.0, format="%.2f",
+        on_change=_on_markup_change,
+        help="Percentage above the overall cost per plate. Negative means "
+             "the plate sells for less than it costs.",
+    )
+    in2.number_input(
+        "Selling price / plate", key="sq_selling_price",
+        min_value=0.0, step=1.0, format="%.2f",
+        on_change=_on_price_change,
+        help="Set a round price per head and the markup follows.",
+    )
+    in3.number_input("Working days", key="sq_working_days", min_value=1, step=1)
+    in4.number_input("Selling Pax / day", key="sq_selling_pax", min_value=1, step=1)
+
+    sell_price = _current_selling_price()
 
     pax = ss.sq_selling_pax
     days = ss.sq_working_days
     buy_amt = buying_amount(overall_per_plate, pax, days)
     sell_amt = selling_amount(sell_price, pax, days)
+
+    # A price under the overall cost is allowed — bids happen — but it must
+    # not pass unremarked, because every figure below it is then a loss.
+    # A paisa of rounding in the displayed price is not a loss, so compare
+    # with a one-paisa tolerance.
+    if sell_price < overall_per_plate - 0.01:
+        st.warning(
+            f"₹{sell_price:,.2f} per plate is below the overall cost of "
+            f"₹{overall_per_plate:,.2f} — this plan sells at a loss."
+        )
 
     m1, m2, m3 = st.columns(3)
     m1.metric("Selling Price / plate", f"₹{sell_price:,.2f}")
@@ -156,14 +223,25 @@ def render_smartq_cost(overall_per_plate: float) -> None:
     total = smartq_cost(
         ss[f"sq_{key}_abs"] for key, _l, _d, _c, _dv in SMARTQ_COST_LINES
     )
-    profit = smartq_profit(sell_amt, buy_amt, total)
+    # SmartQ's share of the plate, set in the vendor tab as the remainder
+    # once the vendor's costs and profit are accounted for. A margin, not
+    # a cost — so it is credited to profit.
+    share_pct = ss.get("vc_smartq_share_pct", 0.0)
+    vendor_share = share_amount(share_pct, overall_per_plate, pax, days)
+    profit = smartq_profit(sell_amt, buy_amt, total, vendor_share)
     profit_margin = smartq_profit_pct(profit, sell_amt)
 
     st.divider()
-    out1, out2 = st.columns(2)
+    out1, out2, out3 = st.columns(3)
     out1.metric("SmartQ Cost", f"₹{total:,.2f}",
                 help="Sum of every operating line above (monthly basis; the "
                      "yearly Food Licenses line is included at 1/12).")
-    out2.metric("SmartQ Profit", f"₹{profit:,.2f}", delta=f"{profit_margin:.2f}%",
-                help="Selling amount − buying amount − SmartQ cost; the delta "
-                     "is profit as a % of the selling amount.")
+    out2.metric("Vendor Share Credit", f"₹{vendor_share:,.2f}",
+                delta=f"{share_pct:.2f}% of the plate", delta_color="off",
+                help="The part of the buying price the vendor doesn't need, "
+                     "set in the Vendor Cost tab. Added to profit, not to "
+                     "cost.")
+    out3.metric("SmartQ Profit", f"₹{profit:,.2f}", delta=f"{profit_margin:.2f}%",
+                help="Selling amount − buying amount − SmartQ cost + vendor "
+                     "share; the delta is profit as a % of the selling "
+                     "amount.")

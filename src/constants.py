@@ -118,13 +118,20 @@ PLATE_CAP_GRAMS = 1000
 # genuinely weighs more, so it gets its own ceiling rather than forcing
 # the portions down to a number that suits a mixed day.
 PLATE_CAP_GRAMS_BY_THEME: Dict[str, int] = {
-    'biryani': 1100,
+    'biryani': 1200,
 }
 
-# A plate with more than this many items is exempt: a counter serving
-# eighteen lines cannot fit the same total as one serving eleven, and
-# trimming everything to make it would leave portions no one would serve.
+# Plates carrying more items than this earn extra headroom: a counter
+# serving eighteen lines cannot fit the same total as one serving eleven.
 PLATE_CAP_SLOT_EXEMPTION = 15
+
+# How much headroom, by item count — (upper bound inclusive, extra grams).
+# Graduated so a 16-item plate isn't handed the same allowance as a
+# 20-item one. The final entry's bound is None, meaning "anything above".
+PLATE_WIDE_ALLOWANCE_GRAMS: List[tuple] = [
+    (17, 50),
+    (None, 100),
+]
 
 # When a plate can't be brought under its cap by choosing lighter items,
 # portions are trimmed instead — in whole steps of this many grams, so
@@ -136,25 +143,39 @@ PLATE_TRIM_STEP_GRAMS = 5
 # guarantees no portion is ever reduced to nothing.
 PLATE_TRIM_MAX_CUT_FRACTION = 0.25
 
-# Backwards-compatible alias: the rule's own default cap, in kilograms.
+# Backwards-compatible alias: the base cap, in kilograms.
 MAX_PLATE_WEIGHT_KG = PLATE_CAP_GRAMS / 1000.0
 
 
+def plate_wide_allowance_grams(slot_count: int) -> int:
+    """Extra grams a plate earns for the number of items on it."""
+    if slot_count <= PLATE_CAP_SLOT_EXEMPTION:
+        return 0
+    for upper, extra in PLATE_WIDE_ALLOWANCE_GRAMS:
+        if upper is None or slot_count <= upper:
+            return extra
+    return 0
+
+
 def plate_cap_grams(day_type: str, slot_count: int) -> Optional[int]:
-    """Serving-weight ceiling for one plate, or ``None`` when uncapped.
+    """Serving-weight ceiling for one plate, in grams.
 
-    Resolution order, most specific first:
+    The theme's cap and the item-count allowance **add**: both are reasons
+    the same plate legitimately weighs more, and a wide biryani counter
+    has both. So a 19-item biryani plate gets 1200 + 100 = 1300 g, which
+    is the only way that day comes within reach of its cap at all — its
+    lightest possible plate is 1660 g and trimming every portion by the
+    permitted quarter only reaches ~1245 g.
 
-    1. A plate with more than :data:`PLATE_CAP_SLOT_EXEMPTION` items is
-       uncapped — more lines legitimately means more food.
-    2. A theme listed in :data:`PLATE_CAP_GRAMS_BY_THEME` uses its own
-       ceiling (biryani days are heavier by nature).
-    3. Everything else gets :data:`PLATE_CAP_GRAMS`.
+    | items | ordinary day | biryani day |
+    |-------|--------------|-------------|
+    | ≤ 15  | 1000 g       | 1200 g      |
+    | 16–17 | 1050 g       | 1250 g      |
+    | 18+   | 1100 g       | 1300 g      |
     """
-    if slot_count > PLATE_CAP_SLOT_EXEMPTION:
-        return None
     theme = canonical_theme(day_type or '')
-    return PLATE_CAP_GRAMS_BY_THEME.get(theme, PLATE_CAP_GRAMS)
+    base = PLATE_CAP_GRAMS_BY_THEME.get(theme, PLATE_CAP_GRAMS)
+    return base + plate_wide_allowance_grams(slot_count)
 
 
 DISPLAY_SLOT_NAME: Dict[str, str] = {

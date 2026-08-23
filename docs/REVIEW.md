@@ -1,6 +1,6 @@
 # Senior-Engineer Audit — May 2026
 
-End-to-end review of the Ikigai Masala codebase, focused on code quality,
+End-to-end review of the Cost Estimator codebase, focused on code quality,
 architecture, UI/UX, database writeback, traceability, security,
 performance, testing, and documentation.
 

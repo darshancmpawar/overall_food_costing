@@ -2,10 +2,11 @@
 Vendor Cost tab.
 
 Scales the average plate food cost up to a fully-loaded operating cost and
-breaks it into editable operating lines, with a live profit readout and
-guardrails. The arithmetic lives in ``src.cost.overall_cost`` (shared scaling)
-and ``src.cost.vendor_cost`` (lines + profit); this module only renders it and
-wires up the two-way percentage <-> rupee inputs.
+breaks it into editable lines — the vendor's operating costs and its
+profit — leaving SmartQ's share as the remainder. The arithmetic lives in
+``src.cost.overall_cost`` (shared scaling) and ``src.cost.vendor_cost``
+(lines, profit, share); this module only renders it and wires up the
+two-way percentage <-> rupee inputs.
 
 Two-way sync, Streamlit-style: the percentage is the single source of truth.
 Each interactive line keeps a ``..._pct`` and a ``..._abs`` widget; their
@@ -27,10 +28,17 @@ from src.cost.overall_cost import (
     pct_to_abs,
 )
 from src.cost.vendor_cost import (
+    DEFAULT_VENDOR_PROFIT_PCT,
     VENDOR_COST_LINES,
-    profit_pct,
     profit_status,
+    share_status,
+    smartq_share_pct,
 )
+
+# The vendor's profit is edited exactly like an operating cost line, so it
+# reuses the same two-way percentage/rupee machinery. Its key follows the
+# same ``vc_<key>_pct`` / ``vc_<key>_abs`` convention.
+_PROFIT_KEY = "profit"
 
 
 def _cols(weights):
@@ -52,11 +60,17 @@ def _current_overall() -> float:
     )
 
 
+def _editable_keys():
+    """Keys of every row whose percentage the user can set — the operating
+    lines plus the vendor's profit."""
+    return [key for key, _label, _default in VENDOR_COST_LINES] + [_PROFIT_KEY]
+
+
 def _on_food_pct_change() -> None:
     # Food share moves the overall total, so every vendor line's rupee amount
     # has to be re-derived from its (unchanged) percentage.
     overall = _current_overall()
-    for key, _label, _default in VENDOR_COST_LINES:
+    for key in _editable_keys():
         st.session_state[f"vc_{key}_abs"] = pct_to_abs(
             st.session_state[f"vc_{key}_pct"], overall
         )
@@ -85,11 +99,12 @@ def _seed_state(avg: float) -> None:
         ss.vc_food_cost_pct = DEFAULT_FOOD_COST_PCT
         for key, _label, default in VENDOR_COST_LINES:
             ss[f"vc_{key}_pct"] = default
+        ss[f"vc_{_PROFIT_KEY}_pct"] = DEFAULT_VENDOR_PROFIT_PCT
 
     if ss.get("vc_seed_avg") != avg:
         ss.vc_seed_avg = avg
         overall = overall_food_cost(avg, ss.vc_food_cost_pct)
-        for key, _label, _default in VENDOR_COST_LINES:
+        for key in _editable_keys():
             ss[f"vc_{key}_abs"] = pct_to_abs(ss[f"vc_{key}_pct"], overall)
 
 
@@ -152,23 +167,57 @@ def render_vendor_cost(avg: float) -> None:
             on_change=_on_abs_change, args=(key,),
         )
 
-    # Profit is the remainder — read-only, derived from the shares above.
-    vendor_pcts = {key: ss[f"vc_{key}_pct"] for key, _l, _d in VENDOR_COST_LINES}
-    p_pct = profit_pct(ss.vc_food_cost_pct, vendor_pcts)
-    p_abs = pct_to_abs(p_pct, overall)
-
+    # The vendor's profit: an input like the lines above it, not a
+    # leftover. A vendor negotiates a margin; it doesn't accept whatever
+    # happens to remain.
     st.divider()
-    profit = _cols([2.4, 1.1, 1.4])
-    profit[0].markdown("**Vendor Profit (remaining)**")
-    profit[1].markdown(f"**{p_pct:.2f}%**")
-    profit[2].markdown(f"**₹{p_abs:,.2f}**")
+    prof = _cols([2.4, 1.1, 1.4])
+    prof[0].markdown("**Vendor Profit**")
+    prof[1].number_input(
+        "Vendor profit share %", key=f"vc_{_PROFIT_KEY}_pct",
+        min_value=0.0, step=0.5, format="%.2f",
+        label_visibility="collapsed",
+        on_change=_on_pct_change, args=(_PROFIT_KEY,),
+    )
+    prof[2].number_input(
+        "Vendor profit amount", key=f"vc_{_PROFIT_KEY}_abs",
+        min_value=0.0, step=1.0, format="%.2f",
+        label_visibility="collapsed",
+        on_change=_on_abs_change, args=(_PROFIT_KEY,),
+    )
+
+    # Whatever is left of the plate is SmartQ's, and it is a margin rather
+    # than a cost — the SmartQ tab credits it to profit.
+    vendor_pcts = {key: ss[f"vc_{key}_pct"] for key, _l, _d in VENDOR_COST_LINES}
+    vendor_profit = ss[f"vc_{_PROFIT_KEY}_pct"]
+    share_pct = smartq_share_pct(
+        ss.vc_food_cost_pct, vendor_pcts, vendor_profit,
+    )
+    share_abs = pct_to_abs(share_pct, overall)
+    # Published for the SmartQ tab, which turns it into money over the
+    # period and adds it to SmartQ's profit.
+    ss.vc_smartq_share_pct = share_pct
+
+    share = _cols([2.4, 1.1, 1.4])
+    share[0].markdown("**SmartQ Share (remaining)**")
+    share[1].markdown(f"**{share_pct:.2f}%**")
+    share[2].markdown(f"**₹{share_abs:,.2f}**")
 
     total = _cols([2.4, 1.1, 1.4])
     total[0].markdown("**Total**")
     total[1].markdown("**100.00%**")
     total[2].markdown(f"**₹{overall:,.2f}**")
 
-    status = profit_status(p_pct)
+    # Two things can be wrong here, and they're different problems: the
+    # shares can over-allocate the plate (arithmetic), or the vendor's
+    # margin can be unrealistic (judgement). Show the first always, the
+    # second only when it needs saying.
+    status = share_status(share_pct)
     {"error": st.error, "warning": st.warning, "ok": st.success}[status.level](
         status.message
     )
+    profit_verdict = profit_status(vendor_profit)
+    if profit_verdict.level != "ok":
+        {"error": st.error, "warning": st.warning}[profit_verdict.level](
+            profit_verdict.message
+        )
