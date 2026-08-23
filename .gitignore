@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Streamlit local secrets — never commit these.
+.streamlit/secrets.toml

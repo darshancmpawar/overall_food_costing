@@ -10,7 +10,16 @@ client-level settings for city, weekend service, item-cooldown window,
 and which item source pools it may draw from. The planner works one
 counter at a time; a day's saved menu holds every counter's picks.
 
-- **Frontend:** Streamlit
+The planner has two modes, switched in the sidebar:
+
+- **Existing Client** — plan for a client configured in the database,
+  replaying saved menus for dates that already have them, and save back.
+- **Cost Estimator For New Clients** — price a *prospective* client by
+  describing a counter inline (name, categories, frequency, day themes),
+  generating a menu from it, and reading the costing panel. Nothing is
+  written to the database.
+
+- **Frontend:** Streamlit — Pulse / OP Lens light theme (`ui/theme.py`)
 - **Backend:** Flask API (auto-started by Streamlit on port 5000)
 - **Solver:** Google OR-Tools CP-SAT
 - **Database:** Supabase (PostgreSQL) — clients, history, config

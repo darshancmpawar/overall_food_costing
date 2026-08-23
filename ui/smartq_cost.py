@@ -27,6 +27,7 @@ from src.cost.smartq_cost import (
     smartq_profit,
     smartq_profit_pct,
 )
+from ui import theme
 
 
 def _cols(weights):
@@ -40,9 +41,9 @@ def _cols(weights):
 def _cadence_badge(cadence: str) -> str:
     """Small pill marking a line as monthly or yearly."""
     if cadence == "yearly":
-        bg, fg = "rgba(242,160,61,0.16)", "#F2A03D"
+        bg, fg = theme.WARNING_BG, theme.WARNING_FG
     else:
-        bg, fg = "rgba(143,214,166,0.14)", "#8FD6A6"
+        bg, fg = theme.SUCCESS_BG, theme.SUCCESS_FG
     return (
         f'<span style="display:inline-block;padding:2px 8px;border-radius:99px;'
         f'font-size:0.62rem;font-weight:700;text-transform:uppercase;'

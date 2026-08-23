@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, Optional, Tuple
 
 from src.constants import DISPLAY_SLOT_NAME, BASE_SLOT_NAMES
+from ui import theme
 
 
 # Day-of-week theme labels (Monday=0)
@@ -20,31 +21,18 @@ THEME_LABELS = {
     6: "Weekend Special",
 }
 
-# Map color initial -> (full name, CSS bg color, CSS text color)
-_COLOR_MAP: Dict[str, Tuple[str, str, str]] = {
-    'R': ('Red',    '#3b1114', '#fca5a5'),
-    'G': ('Green',  '#0f2a1d', '#86efac'),
-    'B': ('Brown',  '#2a1a08', '#d4a56a'),
-    'Y': ('Yellow', '#2a2308', '#fde68a'),
-    'W': ('White',  '#1f1f23', '#d4d4d8'),
-    'O': ('Orange', '#2a1508', '#fdba74'),
-    'K': ('Black',  '#18181b', '#a1a1aa'),
-}
-
+# Item colour pill and day-theme tag palettes live in ui.theme so the
+# stylesheet and these inline styles can't drift apart.
+_COLOR_MAP: Dict[str, Tuple[str, str, str]] = dict(theme.ITEM_COLOR_PILLS)
 
 # Day-theme badge colours keyed by theme name: (background, foreground).
-# Mapped to the food each day actually serves so the grid reads at a glance,
-# and harmonised to the warm spice palette in ui/styles.py.
-THEME_TAG_COLORS = {
-    'mix':     ('#14271C', '#8FD6A6'),  # coriander green (South + North mix)
-    'chinese': ('#0F2622', '#7FCFC0'),  # scallion / jade (Indo-Chinese)
-    'biryani': ('#2E2009', '#F4A53C'),  # saffron rice
-    'south':   ('#292509', '#EAD27A'),  # turmeric / coconut
-    'north':   ('#2E1410', '#EF8A6A'),  # tandoori paprika
-    # Extended theme name clients may store; canonicalised to 'chinese'
-    # before it reaches the solver, but the editor renders the raw value.
-    'chinese_continental': ('#0F2622', '#7FCFC0'),
-}
+# Each theme gets a distinct family from the status/brand palette so the
+# grid reads at a glance: mix = blue, chinese = purple, biryani = yellow,
+# south = green, north = orange.
+THEME_TAG_COLORS = dict(theme.THEME_TAG_COLORS)
+
+# Fallback pair for an unknown or empty theme.
+THEME_TAG_NEUTRAL = theme.TAG_NEUTRAL
 
 THEME_ICONS = {
     'mix':     '&#9670;',   # diamond
@@ -101,7 +89,9 @@ def format_item_html(item_str: str) -> str:
 
     if m:
         initial = m.group(1)
-        color_name, bg, fg = _COLOR_MAP.get(initial, (initial, '#1f1f23', '#a1a1aa'))
+        color_name, bg, fg = _COLOR_MAP.get(
+            initial, (initial, theme.DISABLED_BG, theme.TEXT_2),
+        )
         return (
             f'<span class="item-name">{name}</span>'
             f'<span class="color-pill" style="background:{bg};color:{fg};">'
