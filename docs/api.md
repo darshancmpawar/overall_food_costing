@@ -254,6 +254,13 @@ menu shape arrives in the request instead of being read from the
 }
 ```
 
+The planner's Cost Estimator always sends **one full service week
+starting next Monday** — 5 days, or 7 when `serve_weekends` is set — and
+offers no date picker: an estimate has no history, so the calendar dates
+decide nothing except which day theme lands on which day, and one week
+prices every configured theme exactly once. The endpoint itself accepts
+any `start_date` / `num_days` within the usual limits.
+
 Only `categories` is required. Missing per-slot counts default to 1,
 missing days fall back to the [default theme schedule](#default-theme-schedule),
 extended theme names are canonicalised, and unknown slot names are

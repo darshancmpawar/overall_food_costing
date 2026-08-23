@@ -12,12 +12,15 @@ counter at a time; a day's saved menu holds every counter's picks.
 
 The planner has two modes, switched in the sidebar:
 
-- **Existing Client** — plan for a client configured in the database,
-  replaying saved menus for dates that already have them, and save back.
-- **Cost Estimator For New Clients** — price a *prospective* client by
-  describing a counter inline (name, categories, frequency, day themes),
-  generating a menu from it, and reading the costing panel. Nothing is
-  written to the database.
+- **Cost Estimator For New Clients** (the default) — price a
+  *prospective* client by describing a counter inline (name, categories,
+  frequency, day themes), generating a menu from it, and reading the
+  costing panel. It always costs one full service week starting next
+  Monday, so there are no dates to pick, and nothing is written to the
+  database.
+- **Existing Client** — plan for a client configured in the database over
+  a date range you choose, replaying saved menus for dates that already
+  have them, and save back.
 
 - **Frontend:** Streamlit — Pulse / OP Lens light theme (`ui/theme.py`)
 - **Backend:** Flask API (auto-started by Streamlit on port 5000)
