@@ -89,11 +89,12 @@ RICE_EXCLUDE_ITEMS: Set[str] = {
 # Canonical serving weight (kg) for a whole course, applied by
 # ``DataCleanser`` regardless of what the ontology says.
 #
-# ``cost_per_kg`` and ``grammage_per_serving`` in menu_items.xlsx are
-# XLOOKUP formulas against a separate "Menu List" workbook, so the values
-# the app reads are Excel's cached results and the file cannot be
-# corrected in place — a re-export would reintroduce whatever upstream
-# holds. Corrections therefore live here, where they survive a refresh.
+# ``cost_per_kg`` and ``grammage_per_serving`` come from the Menu List
+# workbook (``data/raw/menu_prices.xlsx``), baked into menu_items.xlsx by
+# ``scripts/bake_price_list.py`` and re-overlaid on every read by
+# ``src.preprocessor.price_list``. A correction written into either file
+# would be undone by the next import, so corrections live here instead,
+# where they survive a refresh.
 #
 # bread: upstream carried three conventions — 30–70 g for one piece
 # (correct), 1000 g on 18 chapatti rows (a unit slip: a kilogram of

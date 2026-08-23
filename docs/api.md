@@ -622,40 +622,55 @@ the migration lands.
 
 ### Serving weights and costs
 
-`cost_per_kg` and `grammage_per_serving` in `data/raw/menu_items.xlsx`
-are **XLOOKUP formulas** against a separate "Menu List" workbook, so the
-values the app reads are Excel's cached results — stale the moment prices
-move.
+`cost_per_kg` and `grammage_per_serving` come from the Menu List workbook,
+`data/raw/menu_prices.xlsx` (sheet "Menu List": one row per item, cost in
+₹/kg and serving weight in kg). They reach the app two ways, and both are
+in play:
 
-That Menu List now ships as `data/raw/menu_prices.xlsx` and is read
-directly by `src.preprocessor.price_list.apply_price_list()`, which
-overrides both columns by normalised item name before cleansing. Costs
-therefore come from the source rather than a cache, and refreshing prices
-is a file drop. Items the list doesn't mention keep their cached values,
-so a partial list degrades instead of blanking out costing; a missing
-file logs a warning and changes nothing.
+1. **Baked into the dataset.** `scripts/bake_price_list.py` writes the
+   list's numbers into those two columns of `data/raw/menu_items.xlsx`.
+   The columns used to hold **XLOOKUP formulas** against an external Menu
+   List workbook that only resolves on the author's machine, so what the
+   app read was whatever Excel last cached — and the cache was wrong in
+   places (dosa at ₹9/kg where the list says ₹80/kg). Baking put 253 cost
+   and 78 grammage values right; the ontology on its own now averages
+   ₹10.27 per serving against ₹8.71 before, matching the list exactly.
+   Re-run the script (`--dry-run` first) after dropping in a new Menu
+   List; `TestPriceList` fails with that instruction if the two files
+   drift apart.
+2. **Overlaid at load time.** `src.preprocessor.price_list.apply_price_list()`
+   re-applies the same list on every read, before cleansing, so a price
+   refresh takes effect as a file drop even without re-baking. Only cells
+   the list has a number for are overwritten; a missing file logs a
+   warning and leaves the baked values standing, which is what a
+   deployment without the Menu List should fall back to.
 
-Two consequences of the formulas remain:
+Matching is by normalised item name — the key the XLOOKUP used. Two
+ontology items carry a base name the list spells out as variants, and are
+mapped explicitly in `_ITEM_NAME_ALIASES` (`myos` → *myos regular*,
+`steamed_rice` → *steamed_rice - Sona Masoori*), so all 530 items are
+priced from the list and none fall back to a cached value.
 
-- The file cannot be corrected in place. Rewriting it with openpyxl
-  either discards every cached value (leaving the app with formula
-  strings and no cost data at all) or replaces formulas with literals
-  that the next upstream refresh would undo.
-- Corrections therefore live in code, in
-  `src.constants.COURSE_SERVING_GRAMMAGE_KG`, applied by
-  `DataCleanser._apply_course_grammage()` so they survive a re-export.
+The workbook also carries a second sheet, "Food cost sheet" — a
+category-level *revised price* list keyed by free-text descriptions
+("Dosa Varieties (mini masala/set/khali/uttappam)") in mixed units
+(KG / NOS / LTR). It cannot be joined to individual items without a human
+mapping, so nothing reads it.
 
-Currently one course is normalised: **bread → 60 g**. Upstream carried
-three conventions in the same column — 30–70 g for one piece (correct),
-1000 g on 18 chapatti rows (a unit slip; that alone outweighed the other
-fourteen categories put together and made the plate read 2.03 kg), and
-0 g on 2 continental loaves. The whole course is set to one serving
-weight rather than the outliers being patched individually.
+#### Grammage corrections in code
 
-The Menu List carries believable bread prices (₹58–120/kg, so ₹3.48–7.20
-a serving at 60 g), but its bread *weights* are still mixed — chapattis
-at 350 g, one dosa at 800 g — which is why the normalisation stays in
-place on top of the import.
+The list's serving *weights* are still mixed for bread — chapattis at
+350 g, one dosa at 800 g — so one correction stays in code, in
+`src.constants.COURSE_SERVING_GRAMMAGE_KG`, applied by
+`DataCleanser._apply_course_grammage()` so it survives any re-import:
+**bread → 60 g**, the whole course rather than the outliers patched
+individually. Upstream carried three conventions in the same column —
+30–70 g for one piece (correct), 1000 g on 18 chapatti rows (a unit slip
+that alone outweighed the other fourteen categories and made the plate
+read 2.03 kg), and 0 g on 2 continental loaves.
+
+After both steps the heaviest serving in the dataset is 300 g (biryani)
+and the mean is 99 g.
 
 ### Slot expansion
 

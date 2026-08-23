@@ -314,6 +314,57 @@ class TestPriceList:
         with pytest.raises(ValueError, match="missing column"):
             load_price_list(bad)
 
+    def test_base_names_resolve_to_the_lists_default_variant(self):
+        """Two ontology items carry a base name the list spells out as
+        variants; without the alias they'd keep a stale cached value."""
+        df = pd.DataFrame([
+            {'item': 'myos', 'cost_per_kg': 1.0,
+             'grammage_per_serving': 0.12},
+            {'item': 'steamed_rice', 'cost_per_kg': 1.0,
+             'grammage_per_serving': 0.01},
+        ])
+        out = apply_price_list(df, 'data/raw/menu_prices.xlsx')
+        assert out.iloc[0]['cost_per_kg'] == 60.0        # myos regular
+        assert out.iloc[0]['grammage_per_serving'] == 0.15
+        assert out.iloc[1]['cost_per_kg'] == 20.0        # Sona Masoori
+        assert out.iloc[1]['grammage_per_serving'] == 0.20
+
+    def test_every_shipped_item_is_priced_by_the_list(self):
+        """Coverage guard on the shipped pair of files: an item the list
+        doesn't price falls back to a cached value, which is exactly the
+        staleness the import exists to remove."""
+        from api.config import DEFAULT_EXCEL_PATH, DEFAULT_PRICE_LIST_PATH
+        from src.preprocessor.price_list import _match_key
+
+        onto = pd.read_excel(DEFAULT_EXCEL_PATH, sheet_name=0)
+        prices = load_price_list(DEFAULT_PRICE_LIST_PATH)
+        unpriced = [
+            item for item in onto['item']
+            if _match_key(item) not in set(prices['key'])
+        ]
+        assert unpriced == []
+
+    def test_the_shipped_ontology_carries_the_lists_numbers(self):
+        """The two columns are baked into the workbook (see
+        scripts/bake_price_list.py), so the dataset costs correctly even
+        with no price list present — not just after the overlay runs."""
+        from api.config import DEFAULT_EXCEL_PATH, DEFAULT_PRICE_LIST_PATH
+        from src.preprocessor.price_list import _match_key
+
+        onto = pd.read_excel(DEFAULT_EXCEL_PATH, sheet_name=0)
+        prices = load_price_list(DEFAULT_PRICE_LIST_PATH).set_index('key')
+        keys = onto['item'].map(_match_key)
+        for column in ('cost_per_kg', 'grammage_per_serving'):
+            got = pd.to_numeric(onto[column], errors='coerce')
+            assert got.notna().all(), f"{column} has non-numeric cells"
+            expected = keys.map(prices[column])
+            drifted = int((got.round(6) != expected.round(6)).sum())
+            assert drifted == 0, (
+                f"{drifted} {column} values in the ontology differ from the "
+                "price list — run scripts/bake_price_list.py after dropping "
+                "in a new Menu List"
+            )
+
     def test_bread_ends_up_at_60g_with_a_real_price(self):
         """The two data fixes together: the list supplies a believable
         price, the cleanser fixes the serving weight the list still has

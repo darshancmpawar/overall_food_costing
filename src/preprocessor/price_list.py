@@ -1,19 +1,19 @@
 """Cost and serving weight, taken from the Menu List workbook.
 
-``data/raw/menu_items.xlsx`` (the ontology) holds ``cost_per_kg`` and
-``grammage_per_serving`` as XLOOKUP formulas pointing at a separate
-"Menu List" workbook, so the values pandas reads are whatever Excel last
-cached — stale the moment prices move, and impossible to correct in the
-ontology itself.
+``data/raw/menu_items.xlsx`` (the ontology) used to hold ``cost_per_kg``
+and ``grammage_per_serving`` as XLOOKUP formulas pointing at a separate
+"Menu List" workbook, so the values pandas read were whatever Excel last
+cached — stale the moment prices moved.
 
-``data/raw/menu_prices.xlsx`` is that Menu List. Reading it directly and
-overriding the two columns makes the app depend on the source of truth
-instead of a cache: refreshing prices becomes a file drop, with no need
-to open Excel and recalculate the ontology.
+``data/raw/menu_prices.xlsx`` is that Menu List. Its numbers are now baked
+into the ontology by ``scripts/bake_price_list.py``, and this module
+re-applies them on every read, so a price refresh takes effect as a file
+drop with no need to open Excel or re-bake.
 
 Matching is by normalised item name, which is the same key the XLOOKUP
-used. Items the list doesn't mention keep whatever the ontology cached,
-so a partial price list degrades instead of blanking out costs.
+used, with a short alias map for items whose ontology name is a base form
+of the list's. Items the list doesn't mention keep whatever the ontology
+holds, so a partial price list degrades instead of blanking out costs.
 """
 
 from __future__ import annotations
@@ -36,6 +36,22 @@ _COST_ALIASES = ["cost per KG", "cost_per_kg", "cost per kg", "costperkg"]
 _GRAM_ALIASES = [
     "grammage per serving", "grammage_per_serving", "grammage", "serving",
 ]
+
+# Two ontology items carry a base name where the Menu List spells out the
+# variant. Both resolve to the plain, default variant — the premium ones
+# are separate offerings the ontology lists separately, and the priced
+# rice the app means by "steamed rice" is Sona Masoori. Keys and values
+# are compared after :func:`_norm_str`.
+_ITEM_NAME_ALIASES = {
+    "myos": "myos regular",
+    "steamed_rice": "steamed_rice - sona masoori",
+}
+
+
+def _match_key(name) -> str:
+    """Normalised item name, resolved through :data:`_ITEM_NAME_ALIASES`."""
+    key = _norm_str(name)
+    return _ITEM_NAME_ALIASES.get(key, key)
 
 
 def load_price_list(path: str | Path) -> pd.DataFrame:
@@ -114,7 +130,7 @@ def apply_price_list(
     if "item" not in df.columns:
         return df
 
-    keys = df["item"].map(_norm_str)
+    keys = df["item"].map(_match_key)
     lookup = prices.set_index("key")
     matched = keys.isin(lookup.index)
 
