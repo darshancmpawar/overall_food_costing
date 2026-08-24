@@ -203,7 +203,8 @@ class TestExtraMargin:
     def test_end_to_end_with_the_defaults(self):
         """The whole chain on realistic numbers, so a change to any one
         constant that breaks the arithmetic shows up here."""
-        from src.cost.overall_cost import pct_to_abs
+        from src.cost.manpower import default_roster, manpower_per_plate
+        from src.cost.overall_cost import abs_to_pct, pct_to_abs
         from src.cost.vendor_cost import (
             DEFAULT_VENDOR_PROFIT_PCT,
             VENDOR_COST_LINES,
@@ -213,11 +214,16 @@ class TestExtraMargin:
         )
 
         overall, pax, days = 247.04, 150, 22
+        # Manpower isn't a typed line — it's the wage bill over the plates
+        # it serves — so the tab adds its computed share to the others.
         vendor = {k: d for k, _l, d in VENDOR_COST_LINES}
+        vendor["manpower"] = abs_to_pct(
+            manpower_per_plate(default_roster(), pax), overall,
+        )
         buying_pct = buying_share_pct(45.0, vendor, DEFAULT_VENDOR_PROFIT_PCT)
         margin_pct = smartq_margin_pct(45.0, vendor, DEFAULT_VENDOR_PROFIT_PCT)
-        assert buying_pct == pytest.approx(98.0)
-        assert margin_pct == pytest.approx(2.0)
+        assert buying_pct == pytest.approx(98.0, abs=0.05)
+        assert margin_pct == pytest.approx(2.0, abs=0.05)
 
         buy_price = pct_to_abs(buying_pct, overall)
         price = selling_price(overall)                       # 30% markup

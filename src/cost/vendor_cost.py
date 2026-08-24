@@ -2,8 +2,14 @@
 Vendor / operating cost model.
 
 Splits the fully-loaded overall cost (see ``src.cost.overall_cost``) into the
-operating lines a vendor carries — manpower, utilities, consumables, etc. —
-each expressed as a share of the overall cost, plus the vendor's own profit.
+operating lines a vendor carries — utilities, consumables, etc. — each
+expressed as a share of the overall cost, plus manpower and the vendor's
+own profit.
+
+Manpower is the exception: it is not a share anyone types in but a wage
+bill divided by the plates it serves, computed in
+``src.cost.manpower``. Its share of the plate is whatever that works out
+to, which is why it moves when the head count does.
 
 Those lines are what the vendor is paid, and together they are the **buying
 price**: what SmartQ hands over per plate::
@@ -33,14 +39,18 @@ from typing import Dict, List, Tuple
 # it doesn't accept whatever remains.
 DEFAULT_VENDOR_PROFIT_PCT = 8.0
 
-# Vendor / operating cost lines: (stable_key, display_label, default_share_pct).
-# ``stable_key`` is used to build Streamlit widget keys, so it must not change
-# once shipped (changing it resets a live session's inputs to the defaults).
-# The order here is the on-screen order. The default shares sum to 45%,
-# which with 45% food and 8% vendor profit puts the buying price at 98% of
-# the overall cost and leaves 2% as SmartQ's margin.
+# Vendor / operating cost lines that are typed in as a share:
+# (stable_key, display_label, default_share_pct). ``stable_key`` is used to
+# build Streamlit widget keys, so it must not change once shipped (changing
+# it resets a live session's inputs to the defaults). The order here is the
+# on-screen order.
+#
+# Manpower is deliberately absent — see ``src.cost.manpower``; the UI adds
+# its computed share to the dict these feed into. These five sum to 20%,
+# which with 45% food, the default roster's 25% manpower at 150 pax, and 8%
+# vendor profit puts the buying price at 98% of the overall cost and leaves
+# 2% as SmartQ's margin.
 VENDOR_COST_LINES: List[Tuple[str, str, float]] = [
-    ("manpower", "Manpower", 25.0),
     ("electricity", "Electricity & Water", 5.0),
     ("consumables", "Consumables", 3.0),
     ("transport", "Transport", 2.0),
@@ -60,9 +70,11 @@ def buying_share_pct(
 ) -> float:
     """Share of the overall cost that SmartQ actually pays the vendor.
 
-    The sum of every input line — food, operating, vendor profit. This is
-    the total the Vendor Cost tab shows, and the per-plate buying price it
-    converts to is what the SmartQ tab buys at.
+    The sum of every vendor line — food, manpower, the other operating
+    lines, and vendor profit. *vendor_pcts* is expected to carry manpower's
+    computed share alongside the typed-in ones. This is the total the
+    Vendor Cost tab shows, and the per-plate buying price it converts to is
+    what the SmartQ tab buys at.
     """
     return food_cost_pct + sum(vendor_pcts.values()) + vendor_profit_pct
 

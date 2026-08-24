@@ -18,8 +18,37 @@ from src.cost.overall_cost import (
     day_costs_from_cost_data,
     overall_food_cost,
 )
+from src.cost.smartq_cost import DEFAULT_SELLING_PAX
 from ui.smartq_cost import render_smartq_cost
 from ui.vendor_cost import render_vendor_cost
+
+# Every metric on this panel carries an annotation in its delta slot — the
+# share of the plate, the divisor, the multiplier — not a change over time.
+# Streamlit draws an up-arrow next to any delta, which would read as
+# "this went up". The arrow goes; the grey annotation stays.
+_PANEL_CSS = """
+<style>
+    [data-testid="stMetricDelta"] svg { display: none; }
+    [data-testid="stMetricDelta"] { gap: 0 !important; }
+</style>
+"""
+
+
+def _panel_pax() -> int:
+    """Head count per day, shared by both tabs.
+
+    The vendor tab needs it before the SmartQ tab renders — manpower is a
+    wage bill divided by the plates it serves — so it is resolved here
+    rather than read out of the SmartQ tab's widget. The live widget wins
+    when it exists (an operator's edit there should move manpower too),
+    then the estimator setup, then the default.
+    """
+    ss = st.session_state
+    setup = ss.get("estimate_setup") or {}
+    for candidate in (ss.get("sq_selling_pax"), setup.get("pax_per_day")):
+        if candidate:
+            return int(candidate)
+    return DEFAULT_SELLING_PAX
 
 
 def _render_panel(avg: float) -> None:
@@ -30,9 +59,11 @@ def _render_panel(avg: float) -> None:
     overall = overall_food_cost(
         avg, st.session_state.get("vc_food_cost_pct", DEFAULT_FOOD_COST_PCT)
     )
+    st.markdown(_PANEL_CSS, unsafe_allow_html=True)
+    pax = _panel_pax()
     vendor_tab, smartq_tab = st.tabs(["Vendor Cost", "SmartQ Costing"])
     with vendor_tab:
-        render_vendor_cost(avg)
+        render_vendor_cost(avg, pax)
     with smartq_tab:
         render_smartq_cost(overall)
 

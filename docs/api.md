@@ -515,6 +515,14 @@ item choice alone, and a biryani day — whose lightest possible plate is
 the average plate food cost of the generated plan. Every figure on both
 tabs is shown to **one decimal place**.
 
+Both tabs are laid out the same way, results first: a **KPI band** across
+the top, then bordered section cards holding the inputs
+(`ui.cards.card_header` + `st.container(border=True)`, shared with the
+customisation and estimator panels). Every metric's delta slot carries an
+annotation rather than a change over time — a share, a divisor, a
+multiplier — so the panel suppresses Streamlit's up-arrow (`_PANEL_CSS` in
+`ui.overall_cost`) and keeps the grey text.
+
 ### Vendor Cost — `src.cost.vendor_cost`
 
 The average plate food cost is only a share of what the operation costs to
@@ -530,11 +538,49 @@ keeps:
 | Line | Default | Set by | In the total? |
 |---|---|---|---|
 | Food cost | 45% | input (the scaling anchor) | yes |
-| Operating lines (manpower, electricity & water, consumables, transport, admin, depreciation) | 45% total | inputs, `VENDOR_COST_LINES` | yes |
+| **Manpower** | **25%** at the default roster and 150 pax | **computed** — `src.cost.manpower` | yes |
+| Operating lines (electricity & water, consumables, transport, admin, depreciation) | 20% total | inputs, `VENDOR_COST_LINES` | yes |
 | **Vendor profit** | **8%** (`DEFAULT_VENDOR_PROFIT_PCT`) | input | yes |
 | **Total — Buying Price / plate** | **98%** (₹242.1 of ₹247.0) | `buying_share_pct()` | — |
 | **SmartQ Profit** (extra margin) | 2% | `smartq_margin_pct()`, the remainder | **no** |
 | Overall Cost / plate | 100% | reference only | — |
+
+#### Manpower — `src.cost.manpower`
+
+Manpower is the one line nobody types a share for. A wage bill is not a
+percentage of anything: it is a headcount on salaries, and the share it
+comes to depends on how many plates that team serves. The Manpower row is
+therefore read-only, with a roster expander under it:
+
+```
+monthly wage bill = sum(units x monthly salary)   per role
+per day           = monthly wage bill / 30        the whole site
+per plate         = per day / pax per day         what the row shows
+share             = per plate / overall cost
+```
+
+Four roles (`MANPOWER_ROLES`): Service Boy, Supervisor, Cafeteria Manager,
+Chef — each with a unit count and a monthly salary. The two divisions are
+different and both are shown in the expander: **30** is the salary month
+(staff are paid for the month, not for the days the cafeteria opens — it is
+deliberately *not* the SmartQ tab's 22 working days), and **pax** turns the
+site's daily bill into a per-plate cost. `pax` is resolved once for the
+whole panel by `ui.overall_cost._panel_pax()` — the live SmartQ widget
+first, then the estimator setup, then the default — because the vendor tab
+needs it before the SmartQ tab renders.
+
+The defaults (6 service boys at ₹22,000, 1 supervisor at ₹30,000, 1
+cafeteria manager at ₹40,000, 2 chefs at ₹38,000 = ₹2,78,000 a month) were
+chosen to land on the 25% manpower was assumed to be before it was costed,
+so adopting the roster doesn't silently move every other figure.
+
+Two consequences worth knowing. Manpower's **share floats**: raising the
+food-cost share moves the overall cost, so manpower's rupee amount holds
+and its percentage falls (the reverse of the typed lines, whose percentage
+holds and rupees move). And a **bigger client is cheaper per plate** — the
+same team at 400 pax is ₹23.2 a plate (9.4%) instead of ₹61.8 (25.0%),
+which pushes the buying price down to ₹203.5 and SmartQ's margin up to
+17.6%.
 
 The total **stops at the vendor's profit**. Everything above it is money
 the vendor is paid, so that sum is the **buying price**, and it is what
@@ -543,6 +589,13 @@ it: it is a margin, not something bought.
 
 Vendor profit is an *input*, not what happens to be left over: a vendor
 negotiates a margin rather than accepting a residue.
+
+Because the default plate leaves only 2% of slack, a manpower increase at
+a small site over-allocates it quickly — one extra chef at 150 pax takes
+the buying price to 101.4% and trips the error. That is the model working:
+it means the assumption that food is 45% of the loaded cost cannot support
+that team at that head count, and either the price or the roster has to
+move.
 
 `margin_status()` reads the remainder: negative means the buying price has
 passed the overall cost (an error, with the real total named so the fix is
