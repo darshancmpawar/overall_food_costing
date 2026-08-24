@@ -587,6 +587,12 @@ If instead the client only ever pays the selling price, the margin is
 already inside `selling_amount - buying_amount` and adding it counts it
 twice; `smartq_profit()` takes `extra_margin=0.0` for that model.
 
+The result trio — **Total SmartQ Profit**, **Extra Margin**, **SmartQ
+Cost** — sits at the *top* of the tab, directly under the inputs, with the
+supporting per-plate and period amounts and the editable cost lines below
+it. The figures depend on those lines, so the space is claimed with a
+`st.container()` before they render and written into afterwards.
+
 The two tabs render in one script run (vendor first), so the buying price
 and margin the SmartQ tab reads are always fresh.
 

@@ -154,8 +154,9 @@ def render_smartq_cost(overall_per_plate: float) -> None:
         "Set the selling price either as a markup over the overall cost per "
         "plate or as the price itself — the two stay in step. Plates are "
         "bought at the vendor's buying price, not the full overall cost. "
-        "Working days and pax/day scale both to period totals; each "
-        "operating line below is a share of the selling amount."
+        "Working days and pax/day scale both to period totals. The result "
+        "is at the top; each operating line further down is a share of the "
+        "selling amount."
     )
 
     in1, in2, in3, in4 = st.columns(4)
@@ -202,6 +203,11 @@ def render_smartq_cost(overall_per_plate: float) -> None:
             f"₹{sell_price:,.1f} per plate is under the ₹{overall_per_plate:,.1f} "
             "overall cost — it covers the vendor but not the fully-loaded cost."
         )
+
+    # The results belong at the top — they are what the tab is for. The
+    # figures depend on the cost lines rendered further down, so the space
+    # is claimed here and written into once they are known.
+    results = st.container()
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Selling Price / plate", f"₹{sell_price:,.1f}")
@@ -250,18 +256,19 @@ def render_smartq_cost(overall_per_plate: float) -> None:
     profit = smartq_profit(sell_amt, buy_amt, total, extra_margin)
     profit_margin = smartq_profit_pct(profit, sell_amt)
 
-    st.divider()
-    out1, out2, out3 = st.columns(3)
-    out1.metric("SmartQ Cost", f"₹{total:,.1f}",
-                help="Sum of every operating line above (monthly basis; the "
-                     "yearly Food Licenses line is included at 1/12).")
-    out2.metric("Extra Margin", f"₹{extra_margin:,.1f}",
-                delta=f"{margin_pct:.1f}% of the plate x {pax} pax x {days} days",
-                delta_color="off",
-                help="SmartQ's profit per plate from the Vendor Cost tab, "
-                     "over the whole period. Revenue — it is added to "
-                     "profit, not to cost.")
-    out3.metric("SmartQ Profit", f"₹{profit:,.1f}", delta=f"{profit_margin:.1f}%",
-                help="Selling amount − buying amount − SmartQ cost + extra "
-                     "margin; the delta is profit as a % of the selling "
-                     "amount.")
+    with results:
+        out1, out2, out3 = st.columns(3)
+        out1.metric("Total SmartQ Profit", f"₹{profit:,.1f}",
+                    delta=f"{profit_margin:.1f}% of the selling amount",
+                    help="Selling amount − buying amount − SmartQ cost + "
+                         "extra margin.")
+        out2.metric("Extra Margin", f"₹{extra_margin:,.1f}",
+                    delta=f"{margin_pct:.1f}% of the plate x {pax} pax x {days} days",
+                    delta_color="off",
+                    help="SmartQ's profit per plate from the Vendor Cost tab, "
+                         "over the whole period. Revenue — it is added to "
+                         "profit, not to cost.")
+        out3.metric("SmartQ Cost", f"₹{total:,.1f}", delta_color="off",
+                    help="Sum of every operating line below (monthly basis; "
+                         "the yearly Food Licenses line is included at 1/12).")
+        st.divider()
