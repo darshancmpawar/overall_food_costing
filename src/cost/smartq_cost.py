@@ -4,8 +4,11 @@ SmartQ cost model.
 Builds on the shared overall cost per plate (see ``src.cost.overall_cost``):
 
     selling_price  = overall_per_plate * (1 + markup)  (markup defaults to 30%)
-    buying_amount  = overall_per_plate * pax * days
+    buying_amount  = buying_price      * pax * days
     selling_amount = selling_price     * pax * days
+
+The plate is *priced* off the overall cost but *bought* at the buying
+price — the vendor's lines and profit only.
 
 The markup is an input, and so is the selling price it produces — the two
 are two views of one number, so the UI keeps them in step. Quoting a
@@ -18,10 +21,10 @@ taken as-is; the yearly Food Licenses line is divided by 12 so its
 monthly-equivalent sits alongside the others when they're summed into the
 SmartQ cost.
 
-SmartQ's profit also picks up the share of the plate the vendor doesn't
-need (see ``src.cost.vendor_cost.smartq_share_pct``). That share is a
-margin, not an operating cost, so it is added to profit — equivalently,
-SmartQ buys at less than the full overall cost and keeps the difference.
+SmartQ's profit also picks up the gap between the buying price and the
+overall cost (see ``src.cost.vendor_cost.smartq_margin_pct``) as an
+**extra margin** over the period. It is revenue rather than an operating
+cost, so it is added to profit.
 
 Pure module — no Streamlit, no I/O — so the arithmetic is unit-testable. The
 ``ui.smartq_cost`` layer renders it and wires up the percentage <-> rupee
@@ -87,10 +90,16 @@ def markup_pct_from_price(price: float, overall_per_plate: float) -> float:
     return max(MIN_MARKUP_PCT, (price / overall_per_plate - 1.0) * 100.0)
 
 
-def buying_amount(overall_per_plate: float, selling_pax: float,
+def buying_amount(buying_price_per_plate: float, selling_pax: float,
                   working_days: float) -> float:
-    """Total cost of producing the plates over the working period."""
-    return overall_per_plate * selling_pax * working_days
+    """Total paid to the vendor for the plates over the working period.
+
+    Priced at the **buying price** — the vendor's lines and profit, per
+    :func:`src.cost.vendor_cost.buying_share_pct` — not at the full
+    overall cost. The gap between the two is SmartQ's margin and is
+    accounted for separately.
+    """
+    return buying_price_per_plate * selling_pax * working_days
 
 
 def selling_amount(sell_price: float, selling_pax: float,
@@ -119,19 +128,23 @@ def smartq_cost(line_values: Iterable[float]) -> float:
 
 
 def smartq_profit(sell_amount: float, buy_amount: float,
-                  total_cost: float, vendor_share: float = 0.0) -> float:
-    """Net SmartQ profit over the period.
+                  total_cost: float, extra_margin: float = 0.0) -> float:
+    """Net SmartQ profit over the period::
 
-    Revenue, less the plates bought from the vendor, less SmartQ's own
-    operating cost, **plus** the share of the plate the vendor doesn't
-    need (:func:`src.cost.vendor_cost.share_amount`).
+        selling amount - buying amount - SmartQ cost + extra margin
 
-    That last term is a credit rather than a cost reduction only in
-    presentation: ``buy_amount`` is quoted at the full overall cost, so
-    adding the share back is the same arithmetic as buying at
-    ``overall - share`` and says more plainly where the money came from.
+    *extra_margin* is SmartQ's margin on the plate over the period
+    (:func:`src.cost.vendor_cost.extra_margin_amount`) — revenue, so it
+    is added rather than netted off a cost line.
+
+    Note what this assumes: *buy_amount* is priced at the buying price,
+    which already excludes that margin, so the margin is counted as a
+    revenue stream of its own rather than as the difference between two
+    prices. If the client's bill is only ``sell_amount``, the margin is
+    already inside ``sell_amount - buy_amount`` and adding it here counts
+    it twice — pass ``0.0`` for that model.
     """
-    return round(sell_amount - buy_amount - total_cost + vendor_share, 2)
+    return round(sell_amount - buy_amount - total_cost + extra_margin, 2)
 
 
 def smartq_profit_pct(profit: float, sell_amount: float) -> float:

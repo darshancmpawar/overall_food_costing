@@ -163,64 +163,79 @@ class TestSellingMarkup:
 
 
 # ---------------------------------------------------------------------------
-# The vendor's leftover share, credited to profit
+# The extra margin, added to profit as revenue
 # ---------------------------------------------------------------------------
 
-class TestVendorShareCredit:
-    def test_share_is_added_to_profit(self):
+class TestExtraMargin:
+    def test_the_margin_is_added_to_profit(self):
         without = smartq_profit(1000.0, 700.0, 100.0)
-        with_share = smartq_profit(1000.0, 700.0, 100.0, vendor_share=50.0)
+        with_margin = smartq_profit(1000.0, 700.0, 100.0, extra_margin=50.0)
         assert without == 200.0
-        assert with_share == 250.0
+        assert with_margin == 250.0
 
-    def test_share_defaults_to_nothing(self):
+    def test_the_margin_defaults_to_nothing(self):
         assert smartq_profit(1000.0, 700.0, 100.0) == 200.0
 
-    def test_crediting_the_share_equals_buying_cheaper(self):
-        """The credit is presentation, not extra money: adding it to
-        profit is the same arithmetic as buying at (overall - share)."""
-        credited = smartq_profit(1000.0, 700.0, 100.0, vendor_share=30.0)
-        bought_cheaper = smartq_profit(1000.0, 670.0, 100.0)
-        assert credited == bought_cheaper
-
-    def test_the_share_does_not_touch_the_cost_lines(self):
-        """It is a margin, so it must not inflate SmartQ's cost total."""
+    def test_the_margin_does_not_touch_the_cost_lines(self):
+        """It is revenue, so it must not inflate SmartQ's cost total."""
         lines = [10.0, 20.0, 30.0]
         assert smartq_cost(lines) == 60.0
 
-    def test_a_negative_share_reduces_profit(self):
+    def test_a_negative_margin_reduces_profit(self):
         """An over-allocated plate means SmartQ is short, and the profit
         must show it rather than clamping at zero."""
-        assert smartq_profit(1000.0, 700.0, 100.0, vendor_share=-50.0) == 150.0
+        assert smartq_profit(1000.0, 700.0, 100.0, extra_margin=-50.0) == 150.0
+
+    def test_buying_at_the_buying_price_is_not_the_same_as_the_margin(self):
+        """The two halves of the change must not both be applied to the
+        same money. Buying cheaper *and* adding the margin counts it
+        twice, and that is a deliberate modelling choice (the margin is a
+        revenue stream of its own), not an accident — so pin the gap."""
+        overall, buying, margin = 1000.0, 980.0, 20.0
+        # Old model: bought at the overall cost, margin credited back.
+        old = smartq_profit(1300.0, overall, 100.0, extra_margin=margin)
+        # New model: bought at the buying price, margin added as revenue.
+        new = smartq_profit(1300.0, buying, 100.0, extra_margin=margin)
+        assert new - old == pytest.approx(margin)
 
     def test_end_to_end_with_the_defaults(self):
         """The whole chain on realistic numbers, so a change to any one
         constant that breaks the arithmetic shows up here."""
+        from src.cost.overall_cost import pct_to_abs
         from src.cost.vendor_cost import (
-            DEFAULT_VENDOR_PROFIT_PCT, VENDOR_COST_LINES, share_amount,
-            smartq_share_pct,
+            DEFAULT_VENDOR_PROFIT_PCT,
+            VENDOR_COST_LINES,
+            buying_share_pct,
+            extra_margin_amount,
+            smartq_margin_pct,
         )
 
         overall, pax, days = 247.04, 150, 22
+        vendor = {k: d for k, _l, d in VENDOR_COST_LINES}
+        buying_pct = buying_share_pct(45.0, vendor, DEFAULT_VENDOR_PROFIT_PCT)
+        margin_pct = smartq_margin_pct(45.0, vendor, DEFAULT_VENDOR_PROFIT_PCT)
+        assert buying_pct == pytest.approx(98.0)
+        assert margin_pct == pytest.approx(2.0)
+
+        buy_price = pct_to_abs(buying_pct, overall)
         price = selling_price(overall)                       # 30% markup
         sell = selling_amount(price, pax, days)
-        buy = buying_amount(overall, pax, days)
+        buy = buying_amount(buy_price, pax, days)
         cost = smartq_cost(
             line_abs(d, sell, div)
             for _k, _l, d, _c, div in SMARTQ_COST_LINES
         )
-        share_pct = smartq_share_pct(
-            45.0, {k: d for k, _l, d in VENDOR_COST_LINES},
-            DEFAULT_VENDOR_PROFIT_PCT,
-        )
-        share = share_amount(share_pct, overall, pax, days)
+        margin = extra_margin_amount(margin_pct, overall, pax, days)
 
-        assert share_pct == pytest.approx(2.0)
-        plain = smartq_profit(sell, buy, cost)
-        credited = smartq_profit(sell, buy, cost, share)
-        assert credited > plain
-        assert credited - plain == pytest.approx(share)
-        assert smartq_profit_pct(credited, sell) > 0
+        # The per-plate figures reconcile: what the vendor is paid plus
+        # SmartQ's margin is the overall cost (to the paisa the screen
+        # shows), and the period totals are those figures scaled up.
+        margin_per_plate = pct_to_abs(margin_pct, overall)
+        assert buy_price + margin_per_plate == pytest.approx(overall, abs=0.01)
+        assert margin == pytest.approx(margin_per_plate * pax * days)
+        profit = smartq_profit(sell, buy, cost, margin)
+        assert profit > smartq_profit(sell, buy, cost)
+        assert smartq_profit_pct(profit, sell) > 0
 
 
 class TestBelowCostPricing:

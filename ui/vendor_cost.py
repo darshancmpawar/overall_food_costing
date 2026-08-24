@@ -3,10 +3,12 @@ Vendor Cost tab.
 
 Scales the average plate food cost up to a fully-loaded operating cost and
 breaks it into editable lines — the vendor's operating costs and its
-profit — leaving SmartQ's share as the remainder. The arithmetic lives in
-``src.cost.overall_cost`` (shared scaling) and ``src.cost.vendor_cost``
-(lines, profit, share); this module only renders it and wires up the
-two-way percentage <-> rupee inputs.
+profit. Those lines total to the **buying price**: what SmartQ pays the
+vendor per plate. What is left between that total and the overall cost is
+**SmartQ's profit**, shown below the total and deliberately outside it.
+The arithmetic lives in ``src.cost.overall_cost`` (shared scaling) and
+``src.cost.vendor_cost`` (lines, profit, margin); this module only renders
+it and wires up the two-way percentage <-> rupee inputs.
 
 Two-way sync, Streamlit-style: the percentage is the single source of truth.
 Each interactive line keeps a ``..._pct`` and a ``..._abs`` widget; their
@@ -30,9 +32,10 @@ from src.cost.overall_cost import (
 from src.cost.vendor_cost import (
     DEFAULT_VENDOR_PROFIT_PCT,
     VENDOR_COST_LINES,
+    buying_share_pct,
+    margin_status,
     profit_status,
-    share_status,
-    smartq_share_pct,
+    smartq_margin_pct,
 )
 
 # The vendor's profit is edited exactly like an operating cost line, so it
@@ -125,12 +128,14 @@ def render_vendor_cost(avg: float) -> None:
     st.caption(
         "Food cost is the average plate cost across every day in the generated "
         "plan. It's only one slice of what the operation costs to run — scaling "
-        "it up from its share to 100% gives the overall cost to price against."
+        "it up from its share to 100% gives the overall cost to price against. "
+        "The lines below total to the buying price paid to the vendor; the rest "
+        "of the plate is SmartQ's profit."
     )
 
     m1, m2 = st.columns(2)
-    m1.metric("Avg Food Cost / plate", f"₹{avg:,.2f}")
-    m2.metric("Overall Cost / plate", f"₹{overall:,.2f}")
+    m1.metric("Avg Food Cost / plate", f"₹{avg:,.1f}")
+    m2.metric("Overall Cost / plate", f"₹{overall:,.1f}")
 
     st.divider()
 
@@ -145,10 +150,10 @@ def render_vendor_cost(avg: float) -> None:
     food[0].markdown("Food Cost")
     food[1].number_input(
         "Food cost share %", key="vc_food_cost_pct",
-        min_value=1.0, max_value=100.0, step=1.0, format="%.2f",
+        min_value=1.0, max_value=100.0, step=1.0, format="%.1f",
         label_visibility="collapsed", on_change=_on_food_pct_change,
     )
-    food[2].markdown(f"₹{avg:,.2f}")
+    food[2].markdown(f"₹{avg:,.1f}")
 
     # Vendor lines: percentage and rupee amount, kept in sync both ways.
     for key, label, _default in VENDOR_COST_LINES:
@@ -156,13 +161,13 @@ def render_vendor_cost(avg: float) -> None:
         row[0].markdown(label)
         row[1].number_input(
             f"{label} share %", key=f"vc_{key}_pct",
-            min_value=0.0, step=0.5, format="%.2f",
+            min_value=0.0, step=0.5, format="%.1f",
             label_visibility="collapsed",
             on_change=_on_pct_change, args=(key,),
         )
         row[2].number_input(
             f"{label} amount", key=f"vc_{key}_abs",
-            min_value=0.0, step=1.0, format="%.2f",
+            min_value=0.0, step=1.0, format="%.1f",
             label_visibility="collapsed",
             on_change=_on_abs_change, args=(key,),
         )
@@ -175,44 +180,58 @@ def render_vendor_cost(avg: float) -> None:
     prof[0].markdown("**Vendor Profit**")
     prof[1].number_input(
         "Vendor profit share %", key=f"vc_{_PROFIT_KEY}_pct",
-        min_value=0.0, step=0.5, format="%.2f",
+        min_value=0.0, step=0.5, format="%.1f",
         label_visibility="collapsed",
         on_change=_on_pct_change, args=(_PROFIT_KEY,),
     )
     prof[2].number_input(
         "Vendor profit amount", key=f"vc_{_PROFIT_KEY}_abs",
-        min_value=0.0, step=1.0, format="%.2f",
+        min_value=0.0, step=1.0, format="%.1f",
         label_visibility="collapsed",
         on_change=_on_abs_change, args=(_PROFIT_KEY,),
     )
 
-    # Whatever is left of the plate is SmartQ's, and it is a margin rather
-    # than a cost — the SmartQ tab credits it to profit.
+    # The total stops at the vendor's profit: everything above is money
+    # the vendor is paid, and that sum is the buying price. SmartQ's own
+    # profit sits below the total, outside it, because it is a margin
+    # rather than something bought.
     vendor_pcts = {key: ss[f"vc_{key}_pct"] for key, _l, _d in VENDOR_COST_LINES}
     vendor_profit = ss[f"vc_{_PROFIT_KEY}_pct"]
-    share_pct = smartq_share_pct(
+    buying_pct = buying_share_pct(
         ss.vc_food_cost_pct, vendor_pcts, vendor_profit,
     )
-    share_abs = pct_to_abs(share_pct, overall)
-    # Published for the SmartQ tab, which turns it into money over the
-    # period and adds it to SmartQ's profit.
-    ss.vc_smartq_share_pct = share_pct
-
-    share = _cols([2.4, 1.1, 1.4])
-    share[0].markdown("**SmartQ Share (remaining)**")
-    share[1].markdown(f"**{share_pct:.2f}%**")
-    share[2].markdown(f"**₹{share_abs:,.2f}**")
+    buying_abs = pct_to_abs(buying_pct, overall)
+    margin_pct = smartq_margin_pct(
+        ss.vc_food_cost_pct, vendor_pcts, vendor_profit,
+    )
+    margin_abs = pct_to_abs(margin_pct, overall)
+    # Published for the SmartQ tab: it buys at this price and turns the
+    # margin into money over the period.
+    ss.vc_buying_price = buying_abs
+    ss.vc_smartq_margin_pct = margin_pct
 
     total = _cols([2.4, 1.1, 1.4])
-    total[0].markdown("**Total**")
-    total[1].markdown("**100.00%**")
-    total[2].markdown(f"**₹{overall:,.2f}**")
+    total[0].markdown("**Total — Buying Price / plate**")
+    total[1].markdown(f"**{buying_pct:.1f}%**")
+    total[2].markdown(f"**₹{buying_abs:,.1f}**")
+
+    st.divider()
+
+    margin = _cols([2.4, 1.1, 1.4])
+    margin[0].markdown("**SmartQ Profit** (extra margin)")
+    margin[1].markdown(f"**{margin_pct:.1f}%**")
+    margin[2].markdown(f"**₹{margin_abs:,.1f}**")
+
+    ref = _cols([2.4, 1.1, 1.4])
+    ref[0].caption("Overall Cost / plate")
+    ref[1].caption("100.0%")
+    ref[2].caption(f"₹{overall:,.1f}")
 
     # Two things can be wrong here, and they're different problems: the
-    # shares can over-allocate the plate (arithmetic), or the vendor's
+    # inputs can over-allocate the plate (arithmetic), or the vendor's
     # margin can be unrealistic (judgement). Show the first always, the
     # second only when it needs saying.
-    status = share_status(share_pct)
+    status = margin_status(margin_pct)
     {"error": st.error, "warning": st.warning, "ok": st.success}[status.level](
         status.message
     )

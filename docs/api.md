@@ -503,7 +503,8 @@ item choice alone, and a biryani day — whose lightest possible plate is
 ## Cost model (costing panel)
 
 "Overall Estimated Cost" opens two independent tabs off one shared number:
-the average plate food cost of the generated plan.
+the average plate food cost of the generated plan. Every figure on both
+tabs is shown to **one decimal place**.
 
 ### Vendor Cost — `src.cost.vendor_cost`
 
@@ -514,26 +515,32 @@ run, so it is scaled up to a fully-loaded **overall cost per plate**:
 overall_per_plate = avg_food_cost / (food_cost_pct / 100)
 ```
 
-The plate is then divided into shares that must add to 100%:
+The plate is then split into what the vendor is paid and what SmartQ
+keeps:
 
-| Share | Default | Set by |
-|---|---|---|
-| Food cost | 45% | input (the scaling anchor) |
-| Operating lines (manpower, electricity & water, consumables, transport, admin, depreciation) | 45% total | inputs, `VENDOR_COST_LINES` |
-| **Vendor profit** | **8%** (`DEFAULT_VENDOR_PROFIT_PCT`) | input |
-| **SmartQ share** | 2% at the defaults | **the remainder** |
+| Line | Default | Set by | In the total? |
+|---|---|---|---|
+| Food cost | 45% | input (the scaling anchor) | yes |
+| Operating lines (manpower, electricity & water, consumables, transport, admin, depreciation) | 45% total | inputs, `VENDOR_COST_LINES` | yes |
+| **Vendor profit** | **8%** (`DEFAULT_VENDOR_PROFIT_PCT`) | input | yes |
+| **Total — Buying Price / plate** | **98%** (₹242.1 of ₹247.0) | `buying_share_pct()` | — |
+| **SmartQ Profit** (extra margin) | 2% | `smartq_margin_pct()`, the remainder | **no** |
+| Overall Cost / plate | 100% | reference only | — |
+
+The total **stops at the vendor's profit**. Everything above it is money
+the vendor is paid, so that sum is the **buying price**, and it is what
+the SmartQ tab buys at. SmartQ's own profit sits below the total, outside
+it: it is a margin, not something bought.
 
 Vendor profit is an *input*, not what happens to be left over: a vendor
-negotiates a margin rather than accepting a residue. What remains after
-the food cost, the operating lines and that margin is SmartQ's share,
-computed by `smartq_share_pct()`.
+negotiates a margin rather than accepting a residue.
 
-`share_status()` reads the remainder: negative means the shares
-over-allocate the plate (an error, with the real total named so the fix is
+`margin_status()` reads the remainder: negative means the buying price has
+passed the overall cost (an error, with the real total named so the fix is
 obvious), exactly zero is a warning, anything positive is fine.
-`profit_status()` separately judges the *input* against a 5–10% band — a
-different kind of problem, so it is only shown when it has something to
-say.
+`profit_status()` separately judges the vendor-profit *input* against a
+5–10% band — a different kind of problem, so it is only shown when it has
+something to say.
 
 Every line is edited as a percentage or as rupees; the percentage is the
 source of truth and `on_change` callbacks keep the partner field in step.
@@ -542,35 +549,46 @@ source of truth and `on_change` callbacks keep the partner field in step.
 
 ```
 selling_price  = overall_per_plate * (1 + markup_pct / 100)   # markup defaults to 30%
-buying_amount  = overall_per_plate * pax * days
+buying_amount  = buying_price      * pax * days
 selling_amount = selling_price     * pax * days
+extra_margin   = smartq_margin_per_plate * pax * days
+smartq_profit  = selling_amount - buying_amount - smartq_cost + extra_margin
 ```
+
+The plate is **priced off the overall cost but bought at the buying
+price** (`vc_buying_price`, published by the vendor tab and shown here as
+its own "Buying Price / plate" metric).
 
 The selling price is set **either way round** — as `markup_pct` or as the
 price per plate — because a deal is usually discussed as a round number
-per head. `markup_pct_from_price()` inverts the markup, and the two
-inputs are kept in step by the same callback pattern. A price below the
-overall cost is allowed (bids happen): the markup goes negative, floored
-at `MIN_MARKUP_PCT` (-100%, a free plate), and the tab warns that the plan
-sells at a loss.
+per head. `markup_pct_from_price()` inverts the markup, and the two inputs
+are kept in step by the same callback pattern. A price below cost is
+allowed (bids happen): the markup goes negative, floored at
+`MIN_MARKUP_PCT` (-100%, a free plate). Two thresholds are flagged
+differently — under the *buying price* is an error (the plate loses money
+outright), between that and the *overall cost* is a warning (the vendor is
+covered, the loaded cost isn't).
 
 Each operating line is a share of the selling amount; the yearly Food
 Licenses line is divided by `MONTHS_PER_YEAR` so its monthly equivalent
 sits alongside the rest when they are summed into the SmartQ cost.
 
-Profit picks up SmartQ's share of the plate from the vendor tab
-(`vc_smartq_share_pct`, turned into money by `share_amount()`):
+**Extra Margin** is SmartQ's per-plate profit from the vendor tab
+(`vc_smartq_margin_pct`) scaled over the period by
+`extra_margin_amount()`. The per-plate figure is rounded to the paisa
+*before* scaling, so it reconciles against the buying price the same tab
+displays rather than drifting by a rounding on every plate.
 
-```
-smartq_profit = selling_amount - buying_amount - smartq_cost + vendor_share
-```
+It is **revenue, not a cost reduction**, so it is added to profit. Note
+what that assumes: `buying_amount` is already priced at the buying price,
+which excludes the margin, so the margin is treated as a revenue stream of
+its own — the client's effective bill is `selling_amount + extra_margin`.
+If instead the client only ever pays the selling price, the margin is
+already inside `selling_amount - buying_amount` and adding it counts it
+twice; `smartq_profit()` takes `extra_margin=0.0` for that model.
 
-That share is a **margin, not a cost reduction**, so it is credited to
-profit and shown as its own "Vendor Share Credit" metric. It is not extra
-money appearing from nowhere: crediting the share to profit is
-arithmetically identical to buying at `overall - share`, which is what the
-vendor tab says actually happens. The two tabs render in one script run
-(vendor first), so the hand-off is always a fresh figure.
+The two tabs render in one script run (vendor first), so the buying price
+and margin the SmartQ tab reads are always fresh.
 
 ## Data model
 
