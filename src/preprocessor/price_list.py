@@ -37,14 +37,11 @@ _GRAM_ALIASES = [
     "grammage per serving", "grammage_per_serving", "grammage", "serving",
 ]
 
-# Two ontology items carry a base name where the Menu List spells out the
-# variant. Both resolve to the plain, default variant — the premium ones
-# are separate offerings the ontology lists separately, and the priced
-# rice the app means by "steamed rice" is Sona Masoori. Keys and values
-# are compared after :func:`_norm_str`.
+# The ontology's plain white rice is the Menu List's "steamed_rice - Sona
+# Masoori": the same dish, and the default variant (not Bullet). Keys and
+# values are compared after :func:`_norm_str`.
 _ITEM_NAME_ALIASES = {
-    "myos": "myos regular",
-    "steamed_rice": "steamed_rice - sona masoori",
+    "white_rice": "steamed_rice - sona masoori",
 }
 
 

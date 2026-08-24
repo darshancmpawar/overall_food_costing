@@ -2,7 +2,13 @@
 
 import pytest
 
-from src.cost.overall_cost import DEFAULT_FOOD_COST_PCT, pct_to_abs
+from src.cost.manpower import default_roster, manpower_per_plate
+from src.cost.overall_cost import (
+    DEFAULT_FOOD_COST_PCT,
+    abs_to_pct,
+    overall_food_cost,
+    pct_to_abs,
+)
 from src.cost.vendor_cost import (
     DEFAULT_VENDOR_PROFIT_PCT,
     MAX_EXPECTED_PROFIT_PCT,
@@ -16,14 +22,50 @@ from src.cost.vendor_cost import (
 )
 
 
-def _defaults():
-    return {key: default for key, _label, default in VENDOR_COST_LINES}
+# The plan the defaults are quoted against: a ₹111.17 average plate at a
+# 45% food share is a ₹247.04 overall cost, and the default roster over
+# 150 pax a day is manpower's 25%.
+_AVG_FOOD_COST = 111.17
+_PAX = 150
+
+
+def _overall():
+    return overall_food_cost(_AVG_FOOD_COST, DEFAULT_FOOD_COST_PCT)
+
+
+def _manpower_pct():
+    """Manpower's share, computed the way the tab computes it."""
+    return abs_to_pct(manpower_per_plate(default_roster(), _PAX), _overall())
+
+
+def _defaults(*, with_manpower: bool = True):
+    """The vendor shares the tab feeds into the model.
+
+    Manpower is not one of ``VENDOR_COST_LINES`` — it is computed from the
+    roster — so the UI adds it to the dict. Tests do the same.
+    """
+    lines = {key: default for key, _label, default in VENDOR_COST_LINES}
+    if with_manpower:
+        lines["manpower"] = _manpower_pct()
+    return lines
 
 
 # --- cost lines ------------------------------------------------------------
 
-def test_vendor_defaults_sum_to_45():
-    assert sum(d for _k, _l, d in VENDOR_COST_LINES) == pytest.approx(45.0)
+def test_the_typed_lines_sum_to_20():
+    """Manpower is computed, not typed, so it is not in this list."""
+    assert sum(d for _k, _l, d in VENDOR_COST_LINES) == pytest.approx(20.0)
+
+
+def test_manpower_is_not_a_typed_line():
+    assert "manpower" not in [k for k, _l, _d in VENDOR_COST_LINES]
+
+
+def test_the_default_roster_is_manpowers_old_25_percent():
+    """The roster defaults were chosen to land where the typed-in share
+    used to sit, so switching to a computed wage bill doesn't silently
+    move every other number on the tab."""
+    assert _manpower_pct() == pytest.approx(25.0, abs=0.05)
 
 
 def test_vendor_line_keys_are_unique():
@@ -34,10 +76,10 @@ def test_vendor_line_keys_are_unique():
 # --- buying_share_pct ------------------------------------------------------
 
 def test_the_buying_price_is_everything_the_vendor_is_paid():
-    """45 food + 45 operating + 8 vendor profit = 98% of the plate."""
+    """45 food + 25 manpower + 20 operating + 8 vendor profit = 98%."""
     assert buying_share_pct(
         DEFAULT_FOOD_COST_PCT, _defaults(), DEFAULT_VENDOR_PROFIT_PCT,
-    ) == pytest.approx(98.0)
+    ) == pytest.approx(98.0, abs=0.05)
 
 
 def test_the_buying_price_excludes_smartqs_margin():
@@ -56,9 +98,23 @@ def test_raising_vendor_profit_raises_the_buying_price():
 
 
 def test_the_buying_price_in_rupees():
-    overall = 247.04
+    overall = _overall()
     buying = buying_share_pct(45.0, _defaults(), 8.0)
-    assert pct_to_abs(buying, overall) == pytest.approx(242.1, abs=0.05)
+    assert pct_to_abs(buying, overall) == pytest.approx(242.1, abs=0.2)
+
+
+def test_a_bigger_client_leaves_more_margin():
+    """The same team over more plates is cheaper per plate, so the buying
+    price falls and SmartQ's margin grows — the whole reason manpower is
+    computed rather than assumed."""
+    overall = _overall()
+    at_150 = abs_to_pct(manpower_per_plate(default_roster(), 150), overall)
+    at_400 = abs_to_pct(manpower_per_plate(default_roster(), 400), overall)
+    lines = {key: default for key, _label, default in VENDOR_COST_LINES}
+    small = smartq_margin_pct(45.0, {**lines, "manpower": at_150}, 8.0)
+    large = smartq_margin_pct(45.0, {**lines, "manpower": at_400}, 8.0)
+    assert large > small
+    assert small == pytest.approx(2.0, abs=0.05)
 
 
 # --- smartq_margin_pct -----------------------------------------------------
@@ -66,7 +122,7 @@ def test_the_buying_price_in_rupees():
 def test_the_defaults_leave_a_margin_for_smartq():
     assert smartq_margin_pct(
         DEFAULT_FOOD_COST_PCT, _defaults(), DEFAULT_VENDOR_PROFIT_PCT,
-    ) == pytest.approx(2.0)
+    ) == pytest.approx(2.0, abs=0.05)
 
 
 def test_vendor_profit_defaults_to_8():

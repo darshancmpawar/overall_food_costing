@@ -49,6 +49,7 @@ from src.cost.smartq_cost import (
 )
 from src.cost.vendor_cost import extra_margin_amount
 from ui import theme
+from ui.cards import card_header, inject_card_css
 
 
 def _cols(weights):
@@ -171,33 +172,44 @@ def render_smartq_cost(overall_per_plate: float) -> None:
         )
         return
 
+    inject_card_css()
     _seed_state(overall_per_plate)
 
-    st.caption(
-        "Set the selling price either as a markup over the overall cost per "
-        "plate or as the price itself — the two stay in step. Plates are "
-        "bought at the vendor's buying price, not the full overall cost. "
-        "Working days and pax/day scale both to period totals. The result "
-        "is at the top; each operating line further down is a share of the "
-        "selling amount."
-    )
+    # Claimed before the cost lines, filled after them: the totals depend
+    # on the line amounts rendered below.
+    results = st.container()
 
-    in1, in2, in3, in4 = st.columns(4)
-    in1.number_input(
-        "Markup %", key="sq_markup_pct",
-        min_value=MIN_MARKUP_PCT, step=1.0, format="%.1f",
-        on_change=_on_markup_change,
-        help="Percentage above the overall cost per plate. Negative means "
-             "the plate sells for less than it costs.",
-    )
-    in2.number_input(
-        "Selling price / plate", key="sq_selling_price",
-        min_value=0.0, step=1.0, format="%.1f",
-        on_change=_on_price_change,
-        help="Set a round price per head and the markup follows.",
-    )
-    in3.number_input("Working days", key="sq_working_days", min_value=1, step=1)
-    in4.number_input("Selling Pax / day", key="sq_selling_pax", min_value=1, step=1)
+    with st.container(border=True):
+        card_header(
+            "Pricing & period",
+            "Set the price as a markup over the overall cost per plate or as "
+            "the price itself — the two stay in step. Head count and service "
+            "days scale everything to period totals.",
+        )
+        in1, in2, in3, in4 = st.columns(4)
+        in1.number_input(
+            "Markup %", key="sq_markup_pct",
+            min_value=MIN_MARKUP_PCT, step=1.0, format="%.1f",
+            on_change=_on_markup_change,
+            help="Percentage above the overall cost per plate. Negative "
+                 "means the plate sells for less than it costs.",
+        )
+        in2.number_input(
+            "Selling price / plate", key="sq_selling_price",
+            min_value=0.0, step=1.0, format="%.1f",
+            on_change=_on_price_change,
+            help="Set a round price per head and the markup follows.",
+        )
+        in3.number_input(
+            "Working days", key="sq_working_days", min_value=1, step=1,
+            help="Service days in the month. Seeded from the estimator's "
+                 "weekend setting: 22 for Mon-Fri, 30 for seven-day.",
+        )
+        in4.number_input(
+            "Selling Pax / day", key="sq_selling_pax", min_value=1, step=1,
+            help="Head count per day. Seeded from the estimator setup; it "
+                 "also divides the vendor's manpower wage bill.",
+        )
 
     sell_price = _current_selling_price()
 
@@ -227,44 +239,48 @@ def render_smartq_cost(overall_per_plate: float) -> None:
             "overall cost — it covers the vendor but not the fully-loaded cost."
         )
 
-    # The results belong at the top — they are what the tab is for. The
-    # figures depend on the cost lines rendered further down, so the space
-    # is claimed here and written into once they are known.
-    results = st.container()
-
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Selling Price / plate", f"₹{sell_price:,.1f}")
+    m1.metric("Selling Price / plate", f"₹{sell_price:,.1f}",
+              delta=f"markup {ss.sq_markup_pct:.1f}%", delta_color="off")
     m2.metric("Buying Price / plate", f"₹{buy_price:,.1f}",
-              help="What the vendor is paid per plate — the Vendor Cost "
-                   "tab's total. The rest of the overall cost is SmartQ's "
-                   "margin.")
-    m3.metric("Buying Amt", f"₹{buy_amt:,.1f}")
-    m4.metric("Selling Amount", f"₹{sell_amt:,.1f}")
+              delta="paid to the vendor", delta_color="off",
+              help="The Vendor Cost tab's total. The rest of the overall "
+                   "cost is SmartQ's margin.")
+    m3.metric("Buying Amt", f"₹{buy_amt:,.1f}",
+              delta=f"x {pax} pax x {days} days", delta_color="off")
+    m4.metric("Selling Amount", f"₹{sell_amt:,.1f}",
+              delta=f"x {pax} pax x {days} days", delta_color="off")
+    st.write("")
 
-    st.divider()
-
-    head = _cols([2.2, 1.0, 1.3, 0.9])
-    head[0].markdown("**Cost line**")
-    head[1].markdown("**Share %**")
-    head[2].markdown("**Amount (₹)**")
-    head[3].markdown("**Cadence**")
-
-    for key, label, _default, cadence, divisor in SMARTQ_COST_LINES:
-        row = _cols([2.2, 1.0, 1.3, 0.9])
-        row[0].markdown(label)
-        row[1].number_input(
-            f"{label} share %", key=f"sq_{key}_pct",
-            min_value=0.0, step=0.5, format="%.1f",
-            label_visibility="collapsed",
-            on_change=_on_pct_change, args=(key, divisor),
+    with st.container(border=True):
+        card_header(
+            "SmartQ operating cost — over the period",
+            "Each line is a share of the selling amount. Monthly lines are "
+            "taken as-is; the yearly one is shown at a twelfth so it sits "
+            "alongside them.",
         )
-        row[2].number_input(
-            f"{label} amount", key=f"sq_{key}_abs",
-            min_value=0.0, step=1.0, format="%.1f",
-            label_visibility="collapsed",
-            on_change=_on_abs_change, args=(key, divisor),
-        )
-        row[3].markdown(_cadence_badge(cadence), unsafe_allow_html=True)
+        head = _cols([2.2, 1.0, 1.3, 0.9])
+        head[0].markdown("**Cost line**")
+        head[1].markdown("**Share %**")
+        head[2].markdown("**Amount (₹)**")
+        head[3].markdown("**Cadence**")
+
+        for key, label, _default, cadence, divisor in SMARTQ_COST_LINES:
+            row = _cols([2.2, 1.0, 1.3, 0.9])
+            row[0].markdown(label)
+            row[1].number_input(
+                f"{label} share %", key=f"sq_{key}_pct",
+                min_value=0.0, step=0.5, format="%.1f",
+                label_visibility="collapsed",
+                on_change=_on_pct_change, args=(key, divisor),
+            )
+            row[2].number_input(
+                f"{label} amount", key=f"sq_{key}_abs",
+                min_value=0.0, step=1.0, format="%.1f",
+                label_visibility="collapsed",
+                on_change=_on_abs_change, args=(key, divisor),
+            )
+            row[3].markdown(_cadence_badge(cadence), unsafe_allow_html=True)
 
     total = smartq_cost(
         ss[f"sq_{key}_abs"] for key, _l, _d, _c, _dv in SMARTQ_COST_LINES
@@ -294,4 +310,4 @@ def render_smartq_cost(overall_per_plate: float) -> None:
         out3.metric("SmartQ Cost", f"₹{total:,.1f}", delta_color="off",
                     help="Sum of every operating line below (monthly basis; "
                          "the yearly Food Licenses line is included at 1/12).")
-        st.divider()
+        st.write("")
