@@ -562,11 +562,11 @@ keeps:
 | Line | Default | Set by | In the total? |
 |---|---|---|---|
 | Food cost | 45% | input (the scaling anchor) | yes |
-| **Manpower** | **25%** at the default roster and 150 pax | **computed** — `src.cost.manpower` | yes |
+| **Manpower** | **7.4%** at the default roster and 150 pax | **computed** — `src.cost.manpower` | yes |
 | Operating lines (electricity & water, consumables, transport, admin, depreciation) | 20% total | inputs, `VENDOR_COST_LINES` | yes |
 | **Vendor profit** | **8%** (`DEFAULT_VENDOR_PROFIT_PCT`) | input | yes |
-| **Total — Buying Price / plate** | **98%** (₹242.1 of ₹247.0) | `buying_share_pct()` | — |
-| **SmartQ Profit** (extra margin) | 2% | `smartq_margin_pct()`, the remainder | **no** |
+| **Total — Buying Price / plate** | **80.4%** (₹177.6 of ₹220.8) | `buying_share_pct()` | — |
+| **SmartQ Profit** (extra margin) | 19.6% | `smartq_margin_pct()`, the remainder | **no** |
 | Overall Cost / plate | 100% | reference only | — |
 
 #### Manpower — `src.cost.manpower`
@@ -593,18 +593,22 @@ whole panel by `ui.overall_cost._panel_pax()` — the live SmartQ widget
 first, then the estimator setup, then the default — because the vendor tab
 needs it before the SmartQ tab renders.
 
-The defaults (6 service boys at ₹22,000, 1 supervisor at ₹30,000, 1
-cafeteria manager at ₹40,000, 2 chefs at ₹38,000 = ₹2,78,000 a month) were
-chosen to land on the 25% manpower was assumed to be before it was costed,
-so adopting the roster doesn't silently move every other figure.
+The roster opens on a **small counter**: 2 service boys at ₹22,000 and 1
+supervisor at ₹30,000, with the cafeteria manager (₹40,000) and chef
+(₹38,000) at **zero units**. That is ₹74,000 a month → ₹2,466.7 a day →
+**₹16.4 a plate at 150 pax, 7.4%** of a ₹220.8 overall cost.
+
+A role at zero units still carries its salary, so staffing one is a single
+edit to the count rather than a lookup — the units are what an estimate is
+expected to be adjusted from first. Hiring the first chef, for instance,
+adds ₹8.4 a plate.
 
 Two consequences worth knowing. Manpower's **share floats**: raising the
 food-cost share moves the overall cost, so manpower's rupee amount holds
 and its percentage falls (the reverse of the typed lines, whose percentage
 holds and rupees move). And a **bigger client is cheaper per plate** — the
-same team at 400 pax is ₹23.2 a plate (9.4%) instead of ₹61.8 (25.0%),
-which pushes the buying price down to ₹203.5 and SmartQ's margin up to
-17.6%.
+same team at 400 pax is ₹6.2 a plate (2.8%) instead of ₹16.4 (7.4%), which
+pushes the buying price down to ₹167.3 and SmartQ's margin up to 24.2%.
 
 The total **stops at the vendor's profit**. Everything above it is money
 the vendor is paid, so that sum is the **buying price**, and it is what
@@ -614,12 +618,11 @@ it: it is a margin, not something bought.
 Vendor profit is an *input*, not what happens to be left over: a vendor
 negotiates a margin rather than accepting a residue.
 
-Because the default plate leaves only 2% of slack, a manpower increase at
-a small site over-allocates it quickly — one extra chef at 150 pax takes
-the buying price to 101.4% and trips the error. That is the model working:
-it means the assumption that food is 45% of the loaded cost cannot support
-that team at that head count, and either the price or the roster has to
-move.
+Over-allocation is still reachable — staffing a full team at a small site
+pushes the buying price past 100% and trips the error. That is the model
+working: it means the assumption that food is 45% of the loaded cost
+cannot support that team at that head count, and either the price or the
+roster has to move.
 
 `margin_status()` reads the remainder: negative means the buying price has
 passed the overall cost (an error, with the real total named so the fix is

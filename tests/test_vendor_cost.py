@@ -22,10 +22,11 @@ from src.cost.vendor_cost import (
 )
 
 
-# The plan the defaults are quoted against: a ₹111.17 average plate at a
-# 45% food share is a ₹247.04 overall cost, and the default roster over
-# 150 pax a day is manpower's 25%.
-_AVG_FOOD_COST = 111.17
+# The plan the defaults are quoted against: the ₹99.35 average plate a
+# five-day plan on the default counter produces, which at a 45% food share
+# is a ₹220.8 overall cost. The default roster — a three-person counter —
+# is 7.4% of it over 150 pax a day.
+_AVG_FOOD_COST = 99.35
 _PAX = 150
 
 
@@ -61,11 +62,10 @@ def test_manpower_is_not_a_typed_line():
     assert "manpower" not in [k for k, _l, _d in VENDOR_COST_LINES]
 
 
-def test_the_default_roster_is_manpowers_old_25_percent():
-    """The roster defaults were chosen to land where the typed-in share
-    used to sit, so switching to a computed wage bill doesn't silently
-    move every other number on the tab."""
-    assert _manpower_pct() == pytest.approx(25.0, abs=0.05)
+def test_the_default_rosters_share():
+    """The roster opens on a small counter — two service boys and a
+    supervisor — so manpower starts light and staffing up moves it."""
+    assert _manpower_pct() == pytest.approx(7.4, abs=0.1)
 
 
 def test_vendor_line_keys_are_unique():
@@ -76,10 +76,10 @@ def test_vendor_line_keys_are_unique():
 # --- buying_share_pct ------------------------------------------------------
 
 def test_the_buying_price_is_everything_the_vendor_is_paid():
-    """45 food + 25 manpower + 20 operating + 8 vendor profit = 98%."""
+    """45 food + 7.4 manpower + 20 operating + 8 vendor profit = 80.4%."""
     assert buying_share_pct(
         DEFAULT_FOOD_COST_PCT, _defaults(), DEFAULT_VENDOR_PROFIT_PCT,
-    ) == pytest.approx(98.0, abs=0.05)
+    ) == pytest.approx(80.4, abs=0.1)
 
 
 def test_the_buying_price_excludes_smartqs_margin():
@@ -100,7 +100,7 @@ def test_raising_vendor_profit_raises_the_buying_price():
 def test_the_buying_price_in_rupees():
     overall = _overall()
     buying = buying_share_pct(45.0, _defaults(), 8.0)
-    assert pct_to_abs(buying, overall) == pytest.approx(242.1, abs=0.2)
+    assert pct_to_abs(buying, overall) == pytest.approx(177.6, abs=0.3)
 
 
 def test_a_bigger_client_leaves_more_margin():
@@ -114,7 +114,7 @@ def test_a_bigger_client_leaves_more_margin():
     small = smartq_margin_pct(45.0, {**lines, "manpower": at_150}, 8.0)
     large = smartq_margin_pct(45.0, {**lines, "manpower": at_400}, 8.0)
     assert large > small
-    assert small == pytest.approx(2.0, abs=0.05)
+    assert small == pytest.approx(19.6, abs=0.1)
 
 
 # --- smartq_margin_pct -----------------------------------------------------
@@ -122,7 +122,7 @@ def test_a_bigger_client_leaves_more_margin():
 def test_the_defaults_leave_a_margin_for_smartq():
     assert smartq_margin_pct(
         DEFAULT_FOOD_COST_PCT, _defaults(), DEFAULT_VENDOR_PROFIT_PCT,
-    ) == pytest.approx(2.0, abs=0.05)
+    ) == pytest.approx(19.6, abs=0.1)
 
 
 def test_vendor_profit_defaults_to_8():

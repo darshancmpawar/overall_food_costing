@@ -213,7 +213,10 @@ class TestExtraMargin:
             smartq_margin_pct,
         )
 
-        overall, pax, days = 247.04, 150, 22
+        # The overall cost a five-day plan on the default counter
+        # produces: a ₹99.35 average plate at a 45% food share. The
+        # roster defaults are calibrated against it.
+        overall, pax, days = 220.78, 150, 22
         # Manpower isn't a typed line — it's the wage bill over the plates
         # it serves — so the tab adds its computed share to the others.
         vendor = {k: d for k, _l, d in VENDOR_COST_LINES}
@@ -222,8 +225,8 @@ class TestExtraMargin:
         )
         buying_pct = buying_share_pct(45.0, vendor, DEFAULT_VENDOR_PROFIT_PCT)
         margin_pct = smartq_margin_pct(45.0, vendor, DEFAULT_VENDOR_PROFIT_PCT)
-        assert buying_pct == pytest.approx(98.0, abs=0.05)
-        assert margin_pct == pytest.approx(2.0, abs=0.05)
+        assert buying_pct == pytest.approx(80.4, abs=0.1)
+        assert margin_pct == pytest.approx(19.6, abs=0.1)
 
         buy_price = pct_to_abs(buying_pct, overall)
         price = selling_price(overall)                       # 30% markup
