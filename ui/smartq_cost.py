@@ -50,6 +50,7 @@ from src.cost.smartq_cost import (
 from src.cost.vendor_cost import extra_margin_amount
 from ui import theme
 from ui.cards import card_header, inject_card_css
+from ui.kpi import kpi_grid, tone_for_amount
 
 
 def _cols(weights):
@@ -239,18 +240,16 @@ def render_smartq_cost(overall_per_plate: float) -> None:
             "overall cost — it covers the vendor but not the fully-loaded cost."
         )
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Selling Price / plate", f"₹{sell_price:,.1f}",
-              delta=f"markup {ss.sq_markup_pct:.1f}%", delta_color="off")
-    m2.metric("Buying Price / plate", f"₹{buy_price:,.1f}",
-              delta="paid to the vendor", delta_color="off",
-              help="The Vendor Cost tab's total. The rest of the overall "
-                   "cost is SmartQ's margin.")
-    m3.metric("Buying Amt", f"₹{buy_amt:,.1f}",
-              delta=f"x {pax} pax x {days} days", delta_color="off")
-    m4.metric("Selling Amount", f"₹{sell_amt:,.1f}",
-              delta=f"x {pax} pax x {days} days", delta_color="off")
-    st.write("")
+    kpi_grid([
+        ("Selling Price / plate", f"₹{sell_price:,.1f}",
+         f"markup {ss.sq_markup_pct:.1f}%", "revenue"),
+        ("Buying Price / plate", f"₹{buy_price:,.1f}",
+         "from Vendor Cost", "info"),
+        ("Buying Amt", f"₹{buy_amt:,.1f}",
+         f"x {pax} pax x {days} days", "cost"),
+        ("Selling Amount", f"₹{sell_amt:,.1f}",
+         f"x {pax} pax x {days} days", "revenue"),
+    ])
 
     with st.container(border=True):
         card_header(
@@ -296,18 +295,13 @@ def render_smartq_cost(overall_per_plate: float) -> None:
     profit_margin = smartq_profit_pct(profit, sell_amt)
 
     with results:
-        out1, out2, out3 = st.columns(3)
-        out1.metric("Total SmartQ Profit", f"₹{profit:,.1f}",
-                    delta=f"{profit_margin:.1f}% of the selling amount",
-                    help="Selling amount − buying amount − SmartQ cost + "
-                         "extra margin.")
-        out2.metric("Extra Margin", f"₹{extra_margin:,.1f}",
-                    delta=f"{margin_pct:.1f}% of the plate x {pax} pax x {days} days",
-                    delta_color="off",
-                    help="SmartQ's profit per plate from the Vendor Cost tab, "
-                         "over the whole period. Revenue — it is added to "
-                         "profit, not to cost.")
-        out3.metric("SmartQ Cost", f"₹{total:,.1f}", delta_color="off",
-                    help="Sum of every operating line below (monthly basis; "
-                         "the yearly Food Licenses line is included at 1/12).")
-        st.write("")
+        kpi_grid([
+            ("Total SmartQ Profit", f"₹{profit:,.1f}",
+             f"{profit_margin:.1f}% of the selling amount",
+             tone_for_amount(profit)),
+            ("Extra Margin", f"₹{extra_margin:,.1f}",
+             f"{margin_pct:.1f}% x {pax} pax x {days} days",
+             tone_for_amount(extra_margin)),
+            ("SmartQ Cost", f"₹{total:,.1f}", "operating lines below",
+             "cost"),
+        ])

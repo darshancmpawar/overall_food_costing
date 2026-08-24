@@ -40,6 +40,8 @@ SECTION_CARD_CSS = f"""
     .status-pill.match {{ background: {t.SUCCESS_BG}; color: {t.SUCCESS_FG}; }}
     .status-pill.new   {{ background: {t.BRAND_YELLOW_BG}; color: {t.BRAND_YELLOW_FG}; }}
     .status-pill.warn  {{ background: {t.WARNING_BG}; color: {t.WARNING_FG}; }}
+    /* "this value is computed, not typed" — informational, not a success. */
+    .status-pill.info  {{ background: {t.BRAND_BLUE_BG}; color: {t.BRAND_BLUE_FG}; }}
     .changes-indicator {{
         display: inline-flex; align-items: center; gap: 0.35rem;
         padding: 0.3rem 0.75rem; background: {t.WARNING_BG};

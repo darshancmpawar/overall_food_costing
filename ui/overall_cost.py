@@ -19,6 +19,7 @@ from src.cost.overall_cost import (
     overall_food_cost,
 )
 from src.cost.smartq_cost import DEFAULT_SELLING_PAX
+from ui.kpi import inject_kpi_css
 from ui.smartq_cost import render_smartq_cost
 from ui.vendor_cost import render_vendor_cost
 
@@ -60,6 +61,7 @@ def _render_panel(avg: float) -> None:
         avg, st.session_state.get("vc_food_cost_pct", DEFAULT_FOOD_COST_PCT)
     )
     st.markdown(_PANEL_CSS, unsafe_allow_html=True)
+    inject_kpi_css()
     pax = _panel_pax()
     vendor_tab, smartq_tab = st.tabs(["Vendor Cost", "SmartQ Costing"])
     with vendor_tab:

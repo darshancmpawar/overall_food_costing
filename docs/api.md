@@ -518,10 +518,34 @@ tabs is shown to **one decimal place**.
 Both tabs are laid out the same way, results first: a **KPI band** across
 the top, then bordered section cards holding the inputs
 (`ui.cards.card_header` + `st.container(border=True)`, shared with the
-customisation and estimator panels). Every metric's delta slot carries an
-annotation rather than a change over time — a share, a divisor, a
-multiplier — so the panel suppresses Streamlit's up-arrow (`_PANEL_CSS` in
-`ui.overall_cost`) and keeps the grey text.
+customisation and estimator panels).
+
+The KPI cards are `ui.kpi.kpi_grid()`, which reuses the planner's
+`.metrics-grid` / `.metric-card` look so the costing screens read as part
+of the same app. What it adds is **tone** — colour that means something,
+or isn't used:
+
+| Tone | Accent | Used for |
+|---|---|---|
+| `neutral` | grey | facts and inputs (avg food cost, overall cost, wage bill) |
+| `cost` | blue | money out (buying price, buying amount, SmartQ cost) |
+| `revenue` | purple | money in (selling price, selling amount) |
+| `info` | blue note | a figure the other tab produced (Buying Price / plate) |
+| `good` / `bad` | green / red | **profit** — and the only case where the number itself is coloured |
+
+`tone_for_amount()` picks good/bad by sign, so a negative profit is the
+one figure on these screens that cannot read like every other one: at a
+115% buying price the SmartQ Profit KPI, the Result row and the Total
+SmartQ Profit all turn red together (−₹37.1 per plate, −₹182,075.2 over
+the period). A negative always carries its minus sign as well as its
+colour, so the meaning survives for anyone who can't tell the two apart.
+The `from roster` pill on the Manpower row is `status-pill info` (blue) —
+"computed, not typed" is information, not success.
+
+Streamlit's metric widget is not used in the band: every annotation there
+is a share, a divisor or a multiplier rather than a change over time, and
+the widget draws an up-arrow next to any delta. `_PANEL_CSS` in
+`ui.overall_cost` suppresses that arrow for the metrics that remain.
 
 ### Vendor Cost — `src.cost.vendor_cost`
 
