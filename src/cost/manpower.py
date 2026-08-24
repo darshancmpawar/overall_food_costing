@@ -37,22 +37,17 @@ DAYS_PER_SALARY_MONTH = 30
 # ``stable_key`` builds Streamlit widget keys, so it must not change once
 # shipped.
 #
-# The defaults describe a mid-size corporate cafeteria and come to a wage
-# bill of Rs 2,48,000 a month. They are calibrated, not invented: at the
-# default 150 pax and the ~Rs 99 average plate the current dataset
-# produces, they land on 25.0% of the plate — the share manpower was
-# assumed to be before it was costed from a roster. Keeping the default
-# there means adopting the roster doesn't move every other figure on the
-# tab; the numbers are a starting point, not a recommendation, since real
-# salaries vary by city and by contract.
-#
-# Recalibrating: 25% of the overall cost, times pax, times 30, is the
-# monthly bill to aim for. It moves whenever the plate cost does.
+# The defaults are a small counter: two service boys and a supervisor, with
+# the cafeteria manager and chef at zero. A role at zero units still shows
+# its salary, so staffing one is a single edit rather than a lookup. The
+# salaries are a starting point, not a recommendation — they vary by city
+# and by contract — and the units are what an estimate is expected to be
+# adjusted from first.
 MANPOWER_ROLES: List[Tuple[str, str, int, float]] = [
-    ("service_boy", "Service Boy", 6, 20000.0),
-    ("supervisor", "Supervisor", 1, 28000.0),
-    ("cafeteria_manager", "Cafeteria Manager", 1, 36000.0),
-    ("chef", "Chef", 2, 32000.0),
+    ("service_boy", "Service Boy", 2, 22000.0),
+    ("supervisor", "Supervisor", 1, 30000.0),
+    ("cafeteria_manager", "Cafeteria Manager", 0, 40000.0),
+    ("chef", "Chef", 0, 38000.0),
 ]
 
 

@@ -225,8 +225,8 @@ class TestExtraMargin:
         )
         buying_pct = buying_share_pct(45.0, vendor, DEFAULT_VENDOR_PROFIT_PCT)
         margin_pct = smartq_margin_pct(45.0, vendor, DEFAULT_VENDOR_PROFIT_PCT)
-        assert buying_pct == pytest.approx(98.0, abs=0.1)
-        assert margin_pct == pytest.approx(2.0, abs=0.1)
+        assert buying_pct == pytest.approx(80.4, abs=0.1)
+        assert margin_pct == pytest.approx(19.6, abs=0.1)
 
         buy_price = pct_to_abs(buying_pct, overall)
         price = selling_price(overall)                       # 30% markup

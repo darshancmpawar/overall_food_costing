@@ -16,8 +16,7 @@ from src.cost.manpower import (
 from src.cost.overall_cost import abs_to_pct, overall_food_cost
 
 # The average plate a five-day plan on the default counter produces today.
-# The roster defaults are calibrated against it, so when the dataset moves
-# far enough to change this, both move together.
+# Used to express the roster's share of a plate in the tests below.
 REPRESENTATIVE_AVG_PLATE = 99.35
 
 
@@ -38,7 +37,25 @@ def test_default_roster_shape():
     roster = default_roster()
     assert set(roster) == {k for k, _l, _u, _s in MANPOWER_ROLES}
     for units, salary in roster.values():
-        assert units > 0 and salary > 0
+        assert units >= 0 and salary > 0
+
+
+def test_the_default_roster_is_a_small_counter():
+    """Two service boys and a supervisor; the manager and chef start at
+    zero. An estimate is expected to staff up from there, so a role at
+    zero units still carries its salary and needs only the count."""
+    roster = default_roster()
+    assert roster["service_boy"] == (2, 22000.0)
+    assert roster["supervisor"] == (1, 30000.0)
+    assert roster["cafeteria_manager"] == (0, 40000.0)
+    assert roster["chef"] == (0, 38000.0)
+
+
+def test_a_role_at_zero_units_still_offers_a_salary():
+    """So staffing it is one edit, not a lookup."""
+    for key, _label, units, salary in MANPOWER_ROLES:
+        if units == 0:
+            assert salary > 0, key
 
 
 # --- one role --------------------------------------------------------------
@@ -61,7 +78,8 @@ def test_negative_headcount_is_treated_as_none():
 # --- the chain -------------------------------------------------------------
 
 def test_the_monthly_bill_is_the_sum_of_the_roster():
-    assert monthly_wage_bill(default_roster()) == pytest.approx(248000.0)
+    # 2 x 22,000 + 1 x 30,000; the two roles at zero units add nothing.
+    assert monthly_wage_bill(default_roster()) == pytest.approx(74000.0)
 
 
 def test_a_month_is_thirty_days_not_the_service_calendar():
@@ -81,8 +99,8 @@ def test_no_pax_means_no_per_plate_cost_rather_than_a_crash():
 
 
 def test_the_whole_chain_end_to_end():
-    # 248,000 a month / 30 = 8,266.67 a day / 150 plates = 55.11 a plate
-    assert manpower_per_plate(default_roster(), 150) == pytest.approx(55.11)
+    # 74,000 a month / 30 = 2,466.67 a day / 150 plates = 16.44 a plate
+    assert manpower_per_plate(default_roster(), 150) == pytest.approx(16.44)
 
 
 def test_the_same_team_costs_less_per_plate_on_a_bigger_site():
@@ -94,27 +112,23 @@ def test_the_same_team_costs_less_per_plate_on_a_bigger_site():
     assert small / large == pytest.approx(4.0, abs=0.01)
 
 
-def test_the_default_roster_lands_on_the_old_25_percent():
-    """The defaults were picked so switching from a typed-in 25% to a
-    computed wage bill doesn't move every other figure on the tab.
-
-    Calibrated against what the current dataset actually produces: a
-    five-day plan on the default counter averages ~₹99.35 a plate, which
-    at a 45% food share is a ₹220.8 overall cost.
-    """
+def test_the_default_rosters_share_of_a_plate():
+    """A three-person counter over 150 covers is a light manpower line —
+    7.4% of a ₹220.8 plate. Staffing up is what moves it."""
     overall = overall_food_cost(REPRESENTATIVE_AVG_PLATE, 45.0)
     per_plate = manpower_per_plate(default_roster(), 150)
-    assert abs_to_pct(per_plate, overall) == pytest.approx(25.0, abs=0.1)
+    assert abs_to_pct(per_plate, overall) == pytest.approx(7.4, abs=0.1)
 
 
-def test_hiring_one_more_chef_moves_the_plate():
+def test_hiring_the_first_chef_moves_the_plate():
+    """The chef starts at zero units, so hiring one is the common edit."""
     roster = default_roster()
-    roster["chef"] = (3, 32000.0)
-    assert monthly_wage_bill(roster) == pytest.approx(280000.0)
-    # 32,000 more a month is 1,066.67 a day, 7.11 across 150 plates.
+    roster["chef"] = (1, 38000.0)
+    assert monthly_wage_bill(roster) == pytest.approx(112000.0)
+    # 38,000 a month is 1,266.67 a day, 8.44 across 150 plates.
     assert manpower_per_plate(roster, 150) - manpower_per_plate(
         default_roster(), 150,
-    ) == pytest.approx(7.11, abs=0.02)
+    ) == pytest.approx(8.45, abs=0.02)
 
 
 def test_an_empty_roster_costs_nothing():
