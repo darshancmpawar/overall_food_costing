@@ -5,6 +5,7 @@ import pytest
 from src.cost.smartq_cost import (
     DEFAULT_SELLING_PAX,
     DEFAULT_WORKING_DAYS,
+    WORKING_DAYS_SEVEN_DAY,
     MIN_MARKUP_PCT,
     MONTHS_PER_YEAR,
     SMARTQ_COST_LINES,
@@ -12,6 +13,7 @@ from src.cost.smartq_cost import (
     line_abs,
     line_pct,
     markup_pct_from_price,
+    working_days_for,
     selling_amount,
     selling_price,
     smartq_cost,
@@ -264,3 +266,22 @@ class TestBelowCostPricing:
         sell = selling_amount(selling_price(overall, -20.0), pax, days)
         buy = buying_amount(overall, pax, days)
         assert smartq_profit(sell, buy, 0.0) < 0
+
+
+class TestWorkingDaysFromTheServicePattern:
+    """The estimator already knows whether a client is served on weekends,
+    so the SmartQ tab derives its working days from that instead of asking
+    the operator to retype 22 or 30 per estimate."""
+
+    def test_mon_fri_is_the_default_month(self):
+        assert working_days_for(False) == DEFAULT_WORKING_DAYS == 22
+
+    def test_seven_day_service_is_a_longer_month(self):
+        assert working_days_for(True) == WORKING_DAYS_SEVEN_DAY == 30
+
+    def test_weekend_service_scales_every_period_total(self):
+        price, pax = 321.16, 150
+        five = selling_amount(price, pax, working_days_for(False))
+        seven = selling_amount(price, pax, working_days_for(True))
+        assert seven > five
+        assert seven / five == pytest.approx(30 / 22)

@@ -297,6 +297,15 @@ server-side.
 
 ---
 
+### pax_per_day
+
+The setup panel also collects an expected head count. It is sent with the
+rest of the setup and **ignored by the endpoint** — a plan is one plate,
+and the head count changes no menu decision. It exists for the costing
+panel, which multiplies every per-plate figure by it. Being part of the
+same config keeps one estimate's assumptions together instead of splitting
+them between the setup and the costing tab.
+
 ## Save semantics
 
 `POST /api/v1/save` writes **overwrite** to `menu_history` and
@@ -586,6 +595,21 @@ its own — the client's effective bill is `selling_amount + extra_margin`.
 If instead the client only ever pays the selling price, the margin is
 already inside `selling_amount - buying_amount` and adding it counts it
 twice; `smartq_profit()` takes `extra_margin=0.0` for that model.
+
+**Working days and pax/day come from the estimator setup** when there is
+one. The Cost Estimator asks for the expected head count (`pax_per_day`,
+default 150) and whether the client is served on weekends; `/estimate-plan`
+ignores the head count, and the SmartQ tab reads it from `estimate_setup`
+along with `working_days_for(serve_weekends)` — 22 days Mon–Fri, 30 for
+seven-day service. Both stay editable in the tab, and an edit survives
+until the setup itself changes. With no setup (existing-client mode) the
+defaults are 150 pax and 22 days.
+
+The result trio — **Total SmartQ Profit**, **Extra Margin**, **SmartQ
+Cost** — sits at the *top* of the tab, directly under the inputs, with the
+supporting per-plate and period amounts and the editable cost lines below
+it. The figures depend on those lines, so the space is claimed with a
+`st.container()` before they render and written into afterwards.
 
 The two tabs render in one script run (vendor first), so the buying price
 and margin the SmartQ tab reads are always fresh.

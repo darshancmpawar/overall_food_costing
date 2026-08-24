@@ -1,8 +1,8 @@
 """Cost Estimator setup panel — the "new client" mode of the planner.
 
 Sales and ops price a *prospective* client by describing the menu they'd
-serve — name, categories, per-category frequency, and day themes — then
-generating a plan from it and reading the costing panel. Nothing here is
+serve — name, expected head count, categories, per-category frequency, and
+day themes — then generating a plan from it and reading the costing panel. Nothing here is
 written to the database: the client doesn't exist yet, and an estimate
 that half-created one would leave the client list littered with deals
 that never closed.
@@ -33,6 +33,10 @@ _KEY = "_estimator_"
 # Ceiling on servings per category per day, matching the customisation
 # editor's own limit.
 _MAX_PER_DAY = 3
+
+# Head count a fresh estimate opens on. Only a starting point — it is the
+# first thing a deal actually pins down, and the costing panel reads it.
+DEFAULT_ESTIMATE_PAX = 150
 
 
 def _default_categories(metadata: Dict[str, Any]) -> List[str]:
@@ -100,7 +104,7 @@ def render_frequency_picker(
 
 def _setup_summary(
     client_name: str, categories: List[str], counts: Dict[str, int],
-    serve_weekends: bool,
+    serve_weekends: bool, pax_per_day: Optional[int] = None,
 ) -> str:
     """One-line description of the setup, for the collapsed panel's label.
 
@@ -110,8 +114,10 @@ def _setup_summary(
     """
     if not client_name:
         return "Client setup — name, categories, frequency & day themes"
-    bits = [
-        client_name,
+    bits = [client_name]
+    if pax_per_day:
+        bits.append(f"{int(pax_per_day)} pax/day")
+    bits += [
         f"{len(categories)} categor{'y' if len(categories) == 1 else 'ies'}",
         "7-day service" if serve_weekends else "Mon–Fri",
     ]
@@ -137,6 +143,9 @@ def render_estimator_setup(
 
         {"client_name", "categories", "slot_counts", "theme_map",
          "serve_weekends"}
+
+    plus ``pax_per_day``, which the endpoint ignores and the costing panel
+    reads.
 
     *metadata* is the ``/editor-metadata`` payload — the slot vocabulary,
     constant slots, theme list, and default theme map. *has_plan* tells
@@ -168,12 +177,13 @@ def render_estimator_setup(
         st.session_state.get("est_categories") or [],
         st.session_state.get("est_slot_counts") or {},
         bool(st.session_state.get("est_serve_weekends")),
+        st.session_state.get("est_pax_per_day"),
     )
 
     with st.expander(label, expanded=expanded):
         # Held to two thirds: a full-width field for a short name
         # strands its help icon at the far edge of the panel.
-        col_name, _ = st.columns([2, 1])
+        col_name, col_pax = st.columns([2, 1])
         with col_name:
             client_name = st.text_input(
                 "Client name",
@@ -182,6 +192,18 @@ def render_estimator_setup(
                 help="A label for this estimate. It is not looked up in, "
                      "or written to, the client list.",
             ).strip()
+        with col_pax:
+            # Head count doesn't change the menu — the solver plans one
+            # plate — but every figure in the costing panel is per-plate
+            # multiplied by it, so it belongs with the setup rather than
+            # being retyped in the costing tab each time.
+            pax_per_day = st.number_input(
+                "Expected pax / day",
+                key="est_pax_per_day",
+                min_value=1, step=10, value=DEFAULT_ESTIMATE_PAX,
+                help="Head count per day. Feeds the costing panel's period "
+                     "totals; it does not affect the menu.",
+            )
 
         categories = render_slot_editor(
             all_base_slots, st.session_state.est_categories, const_slots, _KEY,
@@ -253,4 +275,5 @@ def render_estimator_setup(
         "slot_counts": dict(slot_counts),
         "theme_map": dict(theme_map),
         "serve_weekends": bool(serve_weekends),
+        "pax_per_day": int(pax_per_day),
     }

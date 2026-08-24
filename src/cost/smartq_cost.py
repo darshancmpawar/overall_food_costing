@@ -49,6 +49,11 @@ MIN_MARKUP_PCT = -100.0
 DEFAULT_WORKING_DAYS = 22
 DEFAULT_SELLING_PAX = 150
 
+# A seven-day operation serves through the weekend, so its month is
+# longer. Both figures are service days per month, which is the period
+# every total on the SmartQ tab is quoted over.
+WORKING_DAYS_SEVEN_DAY = 30
+
 MONTHS_PER_YEAR = 12
 
 # SmartQ operating cost lines:
@@ -67,6 +72,16 @@ SMARTQ_COST_LINES: List[Tuple[str, str, float, str, int]] = [
     ("miscellaneous", "Miscellaneous", 1.0, "monthly", 1),
     ("up_margin", "UP Margin", 2.0, "monthly", 1),
 ]
+
+
+def working_days_for(serve_weekends: bool) -> int:
+    """Service days in a month for a Mon-Fri or a seven-day operation.
+
+    The Cost Estimator already asks which one a prospective client is, so
+    the SmartQ tab derives its working days from that answer rather than
+    making the operator retype 22 or 30 for every estimate.
+    """
+    return WORKING_DAYS_SEVEN_DAY if serve_weekends else DEFAULT_WORKING_DAYS
 
 
 def selling_price(overall_per_plate: float,
