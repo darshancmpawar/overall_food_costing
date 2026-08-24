@@ -14,10 +14,11 @@ cost, or as a price per plate — because a deal is often discussed as a
 round number per head rather than as a percentage. The two inputs are one
 number with two faces, kept in step by the same callback pattern.
 
-Profit also picks up SmartQ's share of the plate from the vendor tab
-(``vc_smartq_share_pct``): the part of the buying price the vendor doesn't
-need. It is a margin, so it is credited to profit rather than netted off
-the cost lines.
+The plates are bought at the **buying price** the vendor tab publishes
+(``vc_buying_price``) — the vendor's lines and profit — not at the full
+overall cost. The gap between the two is SmartQ's margin
+(``vc_smartq_margin_pct``), shown here as **Extra Margin** over the
+period and added to profit as revenue.
 
 Session-state keys are prefixed ``sq_``.
 """
@@ -40,7 +41,7 @@ from src.cost.smartq_cost import (
     smartq_profit,
     smartq_profit_pct,
 )
-from src.cost.vendor_cost import share_amount
+from src.cost.vendor_cost import extra_margin_amount
 from ui import theme
 
 
@@ -151,22 +152,23 @@ def render_smartq_cost(overall_per_plate: float) -> None:
 
     st.caption(
         "Set the selling price either as a markup over the overall cost per "
-        "plate or as the price itself — the two stay in step. Working days "
-        "and pax/day scale it to period totals; each operating line below is "
-        "a share of the selling amount."
+        "plate or as the price itself — the two stay in step. Plates are "
+        "bought at the vendor's buying price, not the full overall cost. "
+        "Working days and pax/day scale both to period totals; each "
+        "operating line below is a share of the selling amount."
     )
 
     in1, in2, in3, in4 = st.columns(4)
     in1.number_input(
         "Markup %", key="sq_markup_pct",
-        min_value=MIN_MARKUP_PCT, step=1.0, format="%.2f",
+        min_value=MIN_MARKUP_PCT, step=1.0, format="%.1f",
         on_change=_on_markup_change,
         help="Percentage above the overall cost per plate. Negative means "
              "the plate sells for less than it costs.",
     )
     in2.number_input(
         "Selling price / plate", key="sq_selling_price",
-        min_value=0.0, step=1.0, format="%.2f",
+        min_value=0.0, step=1.0, format="%.1f",
         on_change=_on_price_change,
         help="Set a round price per head and the markup follows.",
     )
@@ -177,23 +179,38 @@ def render_smartq_cost(overall_per_plate: float) -> None:
 
     pax = ss.sq_selling_pax
     days = ss.sq_working_days
-    buy_amt = buying_amount(overall_per_plate, pax, days)
+    # The vendor tab publishes what the vendor is actually paid. Falling
+    # back to the overall cost keeps this tab finite if it is ever
+    # rendered on its own, in which case SmartQ's margin is zero.
+    buy_price = ss.get("vc_buying_price", overall_per_plate)
+    buy_amt = buying_amount(buy_price, pax, days)
     sell_amt = selling_amount(sell_price, pax, days)
 
-    # A price under the overall cost is allowed — bids happen — but it must
-    # not pass unremarked, because every figure below it is then a loss.
-    # A paisa of rounding in the displayed price is not a loss, so compare
-    # with a one-paisa tolerance.
-    if sell_price < overall_per_plate - 0.01:
+    # A price under cost is allowed — bids happen — but it must not pass
+    # unremarked. There are two thresholds now and they mean different
+    # things: under the buying price the plate loses money outright; between
+    # that and the overall cost it pays the vendor but not the full loaded
+    # cost. A paisa of display rounding is neither, hence the tolerance.
+    if sell_price < buy_price - 0.01:
+        st.error(
+            f"₹{sell_price:,.1f} per plate is less than the ₹{buy_price:,.1f} "
+            "paid to the vendor — every plate loses money before SmartQ's "
+            "own costs."
+        )
+    elif sell_price < overall_per_plate - 0.01:
         st.warning(
-            f"₹{sell_price:,.2f} per plate is below the overall cost of "
-            f"₹{overall_per_plate:,.2f} — this plan sells at a loss."
+            f"₹{sell_price:,.1f} per plate is under the ₹{overall_per_plate:,.1f} "
+            "overall cost — it covers the vendor but not the fully-loaded cost."
         )
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Selling Price / plate", f"₹{sell_price:,.2f}")
-    m2.metric("Buying Amt", f"₹{buy_amt:,.2f}")
-    m3.metric("Selling Amount", f"₹{sell_amt:,.2f}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Selling Price / plate", f"₹{sell_price:,.1f}")
+    m2.metric("Buying Price / plate", f"₹{buy_price:,.1f}",
+              help="What the vendor is paid per plate — the Vendor Cost "
+                   "tab's total. The rest of the overall cost is SmartQ's "
+                   "margin.")
+    m3.metric("Buying Amt", f"₹{buy_amt:,.1f}")
+    m4.metric("Selling Amount", f"₹{sell_amt:,.1f}")
 
     st.divider()
 
@@ -208,13 +225,13 @@ def render_smartq_cost(overall_per_plate: float) -> None:
         row[0].markdown(label)
         row[1].number_input(
             f"{label} share %", key=f"sq_{key}_pct",
-            min_value=0.0, step=0.5, format="%.2f",
+            min_value=0.0, step=0.5, format="%.1f",
             label_visibility="collapsed",
             on_change=_on_pct_change, args=(key, divisor),
         )
         row[2].number_input(
             f"{label} amount", key=f"sq_{key}_abs",
-            min_value=0.0, step=1.0, format="%.2f",
+            min_value=0.0, step=1.0, format="%.1f",
             label_visibility="collapsed",
             on_change=_on_abs_change, args=(key, divisor),
         )
@@ -223,25 +240,28 @@ def render_smartq_cost(overall_per_plate: float) -> None:
     total = smartq_cost(
         ss[f"sq_{key}_abs"] for key, _l, _d, _c, _dv in SMARTQ_COST_LINES
     )
-    # SmartQ's share of the plate, set in the vendor tab as the remainder
-    # once the vendor's costs and profit are accounted for. A margin, not
-    # a cost — so it is credited to profit.
-    share_pct = ss.get("vc_smartq_share_pct", 0.0)
-    vendor_share = share_amount(share_pct, overall_per_plate, pax, days)
-    profit = smartq_profit(sell_amt, buy_amt, total, vendor_share)
+    # SmartQ's margin on the plate — the gap between what the vendor is
+    # paid and the overall cost, set in the vendor tab. Revenue over the
+    # period, so it is added to profit rather than netted off a cost.
+    margin_pct = ss.get("vc_smartq_margin_pct", 0.0)
+    extra_margin = extra_margin_amount(
+        margin_pct, overall_per_plate, pax, days,
+    )
+    profit = smartq_profit(sell_amt, buy_amt, total, extra_margin)
     profit_margin = smartq_profit_pct(profit, sell_amt)
 
     st.divider()
     out1, out2, out3 = st.columns(3)
-    out1.metric("SmartQ Cost", f"₹{total:,.2f}",
+    out1.metric("SmartQ Cost", f"₹{total:,.1f}",
                 help="Sum of every operating line above (monthly basis; the "
                      "yearly Food Licenses line is included at 1/12).")
-    out2.metric("Vendor Share Credit", f"₹{vendor_share:,.2f}",
-                delta=f"{share_pct:.2f}% of the plate", delta_color="off",
-                help="The part of the buying price the vendor doesn't need, "
-                     "set in the Vendor Cost tab. Added to profit, not to "
-                     "cost.")
-    out3.metric("SmartQ Profit", f"₹{profit:,.2f}", delta=f"{profit_margin:.2f}%",
-                help="Selling amount − buying amount − SmartQ cost + vendor "
-                     "share; the delta is profit as a % of the selling "
+    out2.metric("Extra Margin", f"₹{extra_margin:,.1f}",
+                delta=f"{margin_pct:.1f}% of the plate x {pax} pax x {days} days",
+                delta_color="off",
+                help="SmartQ's profit per plate from the Vendor Cost tab, "
+                     "over the whole period. Revenue — it is added to "
+                     "profit, not to cost.")
+    out3.metric("SmartQ Profit", f"₹{profit:,.1f}", delta=f"{profit_margin:.1f}%",
+                help="Selling amount − buying amount − SmartQ cost + extra "
+                     "margin; the delta is profit as a % of the selling "
                      "amount.")
