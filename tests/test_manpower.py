@@ -110,3 +110,29 @@ def test_hiring_one_more_chef_moves_the_plate():
 def test_an_empty_roster_costs_nothing():
     assert monthly_wage_bill({}) == 0.0
     assert manpower_per_plate({}, 150) == 0.0
+
+
+# --- KPI tone (ui.kpi, the one pure function on the presentation side) ------
+
+class TestKpiTone:
+    """Colour on the costing panel carries meaning, so the rule that
+    picks it is worth pinning."""
+
+    def test_a_profit_is_good_and_a_loss_is_bad(self):
+        from ui.kpi import tone_for_amount
+
+        assert tone_for_amount(16302.0) == "good"
+        assert tone_for_amount(-16302.0) == "bad"
+
+    def test_exactly_nothing_is_neutral_by_default(self):
+        from ui.kpi import tone_for_amount
+
+        assert tone_for_amount(0.0) == "neutral"
+        assert tone_for_amount(0.0, zero="warn") == "warn"
+
+    def test_every_tone_defines_a_full_set_of_colours(self):
+        from ui.kpi import _TONES
+
+        for tone, colours in _TONES.items():
+            assert len(colours) == 4, tone
+            assert all(c.startswith("#") for c in colours), tone

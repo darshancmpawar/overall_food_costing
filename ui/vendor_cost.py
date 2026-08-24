@@ -53,7 +53,9 @@ from src.cost.vendor_cost import (
     profit_status,
     smartq_margin_pct,
 )
+from ui import theme as t
 from ui.cards import card_header, inject_card_css
+from ui.kpi import kpi_grid, tone_for_amount
 
 # The vendor's profit is edited exactly like an operating cost line, so it
 # reuses the same two-way percentage/rupee machinery. Its key follows the
@@ -124,14 +126,23 @@ def _seed_state(avg: float) -> None:
     ss = st.session_state
     ss.vc_avg_food_cost = avg
 
-    if "vc_food_cost_pct" not in ss:
-        ss.vc_food_cost_pct = DEFAULT_FOOD_COST_PCT
-        for key, _label, default in VENDOR_COST_LINES:
-            ss[f"vc_{key}_pct"] = default
-        ss[f"vc_{_PROFIT_KEY}_pct"] = DEFAULT_VENDOR_PROFIT_PCT
-        for key, _label, units, salary in MANPOWER_ROLES:
-            ss[f"vc_mp_{key}_units"] = units
-            ss[f"vc_mp_{key}_salary"] = salary
+    # Each key is seeded on its own rather than behind a single "have I
+    # run?" flag: one value arriving from somewhere else (a restored
+    # session, a caller pre-setting a share) would otherwise skip the rest
+    # and leave the tab reading keys that were never written.
+    ss.setdefault("vc_food_cost_pct", DEFAULT_FOOD_COST_PCT)
+    for key, _label, default in VENDOR_COST_LINES:
+        ss.setdefault(f"vc_{key}_pct", default)
+    ss.setdefault(f"vc_{_PROFIT_KEY}_pct", DEFAULT_VENDOR_PROFIT_PCT)
+    for key, _label, units, salary in MANPOWER_ROLES:
+        ss.setdefault(f"vc_mp_{key}_units", units)
+        ss.setdefault(f"vc_mp_{key}_salary", salary)
+    for key in _editable_keys():
+        ss.setdefault(
+            f"vc_{key}_abs",
+            pct_to_abs(ss[f"vc_{key}_pct"],
+                       overall_food_cost(avg, ss.vc_food_cost_pct)),
+        )
 
     if ss.get("vc_seed_avg") != avg:
         ss.vc_seed_avg = avg
@@ -183,12 +194,12 @@ def _render_manpower_roster(pax: int) -> float:
         per_plate = per_plate_cost(daily, pax)
 
         st.divider()
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Wage bill / month", f"₹{monthly:,.1f}")
-        k2.metric("Per day", f"₹{daily:,.1f}", delta="÷ 30 days",
-                  delta_color="off")
-        k3.metric("Per plate", f"₹{per_plate:,.1f}",
-                  delta=f"÷ {pax} pax/day", delta_color="off")
+        kpi_grid([
+            ("Wage bill / month", f"₹{monthly:,.1f}", "units x salary",
+             "neutral"),
+            ("Per day", f"₹{daily:,.1f}", "÷ 30 days", "neutral"),
+            ("Per plate", f"₹{per_plate:,.1f}", f"÷ {pax} pax/day", "cost"),
+        ])
         st.caption(
             "Salaries are monthly, so the month is 30 days — staff are paid "
             "for the month, not for the days the cafeteria opens. The daily "
@@ -216,11 +227,21 @@ def _line_row(label: str, key: str, *, bold: bool = False) -> None:
     )
 
 
-def _total_row(label: str, pct: float, amount: float) -> None:
+def _total_row(label: str, pct: float, amount: float,
+               colour: str = t.TEXT) -> None:
+    """A bold summary row. *colour* tints the figures — used for SmartQ's
+    profit, where a negative is the one number that must not read like
+    every other one."""
     row = _cols()
     row[0].markdown(f"**{label}**")
-    row[1].markdown(f"**{pct:.1f}%**")
-    row[2].markdown(f"**₹{amount:,.1f}**")
+    row[1].markdown(
+        f"<span style='font-weight:700;color:{colour}'>{pct:.1f}%</span>",
+        unsafe_allow_html=True,
+    )
+    row[2].markdown(
+        f"<span style='font-weight:700;color:{colour}'>₹{amount:,.1f}</span>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_vendor_cost(avg: float, pax: int) -> None:
@@ -285,7 +306,7 @@ def render_vendor_cost(avg: float, pax: int) -> None:
         with mp_row:
             mp = _cols()
             mp[0].markdown(
-                "Manpower &nbsp;<span class='status-pill match'>from roster"
+                "Manpower &nbsp;<span class='status-pill info'>from roster"
                 "</span>", unsafe_allow_html=True,
             )
             mp[1].markdown(f"{manpower_pct:.1f}%")
@@ -331,7 +352,12 @@ def render_vendor_cost(avg: float, pax: int) -> None:
             "sits outside the total above and is added to profit in SmartQ "
             "Costing.",
         )
-        _total_row("SmartQ Profit / plate", margin_pct, margin_abs)
+        _total_row(
+            "SmartQ Profit / plate", margin_pct, margin_abs,
+            colour=t.SUCCESS_FG if margin_abs > 0 else (
+                t.ERROR_FG if margin_abs < 0 else t.TEXT
+            ),
+        )
         ref = _cols()
         ref[0].caption("Overall Cost / plate")
         ref[1].caption("100.0%")
@@ -352,18 +378,13 @@ def render_vendor_cost(avg: float, pax: int) -> None:
             )
 
     with kpis:
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Avg Food Cost / plate", f"₹{avg:,.1f}",
-                  help="Average across every day in the generated plan.")
-        k2.metric("Overall Cost / plate", f"₹{overall:,.1f}",
-                  delta=f"food at {ss.vc_food_cost_pct:.1f}%",
-                  delta_color="off",
-                  help="Food cost scaled up from its share to 100%.")
-        k3.metric("Buying Price / plate", f"₹{buying_abs:,.1f}",
-                  delta=f"{buying_pct:.1f}% of the plate", delta_color="off",
-                  help="What the vendor is paid — the total below.")
-        k4.metric("SmartQ Profit / plate", f"₹{margin_abs:,.1f}",
-                  delta=f"{margin_pct:.1f}% of the plate", delta_color="off",
-                  help="The rest of the plate. Added to profit in SmartQ "
-                       "Costing as the extra margin.")
-        st.write("")
+        kpi_grid([
+            ("Avg Food Cost / plate", f"₹{avg:,.1f}",
+             "from the generated plan", "neutral"),
+            ("Overall Cost / plate", f"₹{overall:,.1f}",
+             f"food at {ss.vc_food_cost_pct:.1f}%", "neutral"),
+            ("Buying Price / plate", f"₹{buying_abs:,.1f}",
+             f"{buying_pct:.1f}% — paid to the vendor", "cost"),
+            ("SmartQ Profit / plate", f"₹{margin_abs:,.1f}",
+             f"{margin_pct:.1f}% of the plate", tone_for_amount(margin_abs)),
+        ])
