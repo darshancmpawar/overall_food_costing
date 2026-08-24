@@ -593,17 +593,23 @@ whole panel by `ui.overall_cost._panel_pax()` — the live SmartQ widget
 first, then the estimator setup, then the default — because the vendor tab
 needs it before the SmartQ tab renders.
 
-The defaults (6 service boys at ₹22,000, 1 supervisor at ₹30,000, 1
-cafeteria manager at ₹40,000, 2 chefs at ₹38,000 = ₹2,78,000 a month) were
-chosen to land on the 25% manpower was assumed to be before it was costed,
+The defaults (6 service boys at ₹20,000, 1 supervisor at ₹28,000, 1
+cafeteria manager at ₹36,000, 2 chefs at ₹32,000 = **₹2,48,000 a month**)
+are calibrated, not invented: at 150 pax and the ~₹99.4 average plate the
+current dataset produces (a ₹220.8 overall cost), they land on **25.0%** —
+the share manpower was assumed to be before it was costed from a roster —
 so adopting the roster doesn't silently move every other figure.
+
+To recalibrate after the plate cost moves: `25% x overall x pax x 30` is
+the monthly bill to aim for. `tests/test_manpower.py` pins it against
+`REPRESENTATIVE_AVG_PLATE`, so the two move together.
 
 Two consequences worth knowing. Manpower's **share floats**: raising the
 food-cost share moves the overall cost, so manpower's rupee amount holds
 and its percentage falls (the reverse of the typed lines, whose percentage
 holds and rupees move). And a **bigger client is cheaper per plate** — the
-same team at 400 pax is ₹23.2 a plate (9.4%) instead of ₹61.8 (25.0%),
-which pushes the buying price down to ₹203.5 and SmartQ's margin up to
+same team at 400 pax is ₹20.7 a plate (9.4%) instead of ₹55.1 (25.0%),
+which pushes the buying price down to ₹181.8 and SmartQ's margin up to
 17.6%.
 
 The total **stops at the vendor's profit**. Everything above it is money
@@ -616,7 +622,7 @@ negotiates a margin rather than accepting a residue.
 
 Because the default plate leaves only 2% of slack, a manpower increase at
 a small site over-allocates it quickly — one extra chef at 150 pax takes
-the buying price to 101.4% and trips the error. That is the model working:
+the buying price to 101.2% and trips the error. That is the model working:
 it means the assumption that food is 45% of the loaded cost cannot support
 that team at that head count, and either the price or the roster has to
 move.
