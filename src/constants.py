@@ -52,8 +52,21 @@ COMBINED_SLOT_SOURCES: Dict[str, List[str]] = {
 
 CONST_SLOTS: List[str] = ['white_rice', 'papad', 'pickle', 'chutney']
 
+# What each constant slot serves. These strings are the item name the
+# solver writes onto every day, so they are also what the plan table and
+# the CSV show.
+#
+# They are matched against the ontology's ``item`` column (lowercased,
+# stripped) by ``api.app._const_slot_grams`` to feed the plate-weight cap.
+# 'Papad' and 'Pickle' match rows and contribute their weight; 'White Rice'
+# and 'chutney' do not — the ontology calls them ``white_rice`` and
+# ``coconut_chutney`` / ``garlic_chutney`` / ... — so neither is counted in
+# the cap or costed. That gap predates this table and is deliberate for
+# now: connecting white rice alone adds 150 g to every plate, which puts
+# an ordinary day over its 1000 g cap and makes the trimmer cut 140-300 g
+# from the courses the solver chose.
 CONSTANT_ITEMS: Dict[str, str] = {
-    'white_rice': 'steamed rice',
+    'white_rice': 'White Rice',
     'papad': 'Papad',
     'pickle': 'Pickle',
     'chutney': 'chutney',

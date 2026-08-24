@@ -740,11 +740,33 @@ in play:
    warning and leaves the baked values standing, which is what a
    deployment without the Menu List should fall back to.
 
-Matching is by normalised item name — the key the XLOOKUP used. Two
-ontology items carry a base name the list spells out as variants, and are
-mapped explicitly in `_ITEM_NAME_ALIASES` (`myos` → *myos regular*,
-`steamed_rice` → *steamed_rice - Sona Masoori*), so all 530 items are
-priced from the list and none fall back to a cached value.
+Matching is by normalised item name — the key the XLOOKUP used. One
+ontology item carries a name the list spells differently, mapped in
+`_ITEM_NAME_ALIASES` (`white_rice` → *steamed_rice - Sona Masoori*, the
+default variant rather than Bullet), so all 529 items are priced from the
+list and none fall back to a cached value.
+
+Two rows were retired: `steamed_rice` is now **`white_rice`** — one dish,
+one name, and `CONSTANT_ITEMS['white_rice']` shows it as *White Rice* —
+and **`myos`** was withdrawn, taking its single-item `myos` category with
+it.
+
+#### Constant slots are only half-costed
+
+`api.app._const_slot_grams` matches `CONSTANT_ITEMS` against the
+ontology's `item` column to feed the plate-weight cap, and
+`build_cost_lookup` prices by the same key. Papad and Pickle match rows
+(₹3.0 and ₹2.0, 10 g each). **White Rice and chutney do not** — the
+ontology calls them `white_rice` and `coconut_chutney` /
+`garlic_chutney` / … — so neither is counted in the cap nor costed, on
+any plate.
+
+This is known and deliberately left alone: connecting white rice alone
+adds 150 g to every plate, which takes an ordinary day from 940 g to over
+its 1000 g cap and makes the trimmer cut 140–300 g from courses the
+solver chose, dropping the average plate from ₹99.4 to ₹90.7. Fixing it
+is a pricing decision (and, for chutney, a choice of which chutney), not
+a rename.
 
 The workbook also carries a second sheet, "Food cost sheet" — a
 category-level *revised price* list keyed by free-text descriptions

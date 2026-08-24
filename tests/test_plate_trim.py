@@ -314,20 +314,37 @@ class TestPriceList:
         with pytest.raises(ValueError, match="missing column"):
             load_price_list(bad)
 
-    def test_base_names_resolve_to_the_lists_default_variant(self):
-        """Two ontology items carry a base name the list spells out as
-        variants; without the alias they'd keep a stale cached value."""
+    def test_white_rice_resolves_to_the_lists_sona_masoori(self):
+        """The ontology's white rice is the list's "steamed_rice - Sona
+        Masoori" — the same dish under the name the Menu List uses, and
+        the default variant rather than Bullet. Without the alias it
+        would keep a stale cached value."""
         df = pd.DataFrame([
-            {'item': 'myos', 'cost_per_kg': 1.0,
-             'grammage_per_serving': 0.12},
-            {'item': 'steamed_rice', 'cost_per_kg': 1.0,
+            {'item': 'white_rice', 'cost_per_kg': 1.0,
              'grammage_per_serving': 0.01},
         ])
         out = apply_price_list(df, 'data/raw/menu_prices.xlsx')
-        assert out.iloc[0]['cost_per_kg'] == 60.0        # myos regular
-        assert out.iloc[0]['grammage_per_serving'] == 0.15
-        assert out.iloc[1]['cost_per_kg'] == 20.0        # Sona Masoori
-        assert out.iloc[1]['grammage_per_serving'] == 0.20
+        assert out.iloc[0]['cost_per_kg'] == 20.0
+        assert out.iloc[0]['grammage_per_serving'] == 0.20
+
+    def test_the_constant_slot_is_shown_as_white_rice(self):
+        """The plan table shows whatever CONSTANT_ITEMS says, and the slot
+        serves plain white rice — so that is what it is called."""
+        from src.constants import CONSTANT_ITEMS
+
+        assert CONSTANT_ITEMS['white_rice'] == 'White Rice'
+
+    def test_the_retired_names_are_gone_from_the_dataset(self):
+        """`steamed_rice` is now `white_rice` (one dish, one name, shown
+        as White Rice), and `myos` was withdrawn."""
+        from api.config import DEFAULT_EXCEL_PATH
+
+        onto = pd.read_excel(DEFAULT_EXCEL_PATH, sheet_name=0)
+        items = set(onto['item'])
+        categories = set(onto['category'])
+        assert 'white_rice' in items
+        assert 'steamed_rice' not in items
+        assert 'myos' not in items and 'myos' not in categories
 
     def test_every_shipped_item_is_priced_by_the_list(self):
         """Coverage guard on the shipped pair of files: an item the list
