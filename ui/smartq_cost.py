@@ -20,6 +20,11 @@ overall cost. The gap between the two is SmartQ's margin
 (``vc_smartq_margin_pct``), shown here as **Extra Margin** over the
 period and added to profit as revenue.
 
+Working days and pax/day come from the Cost Estimator setup when there is
+one (``estimate_setup``: ``pax_per_day``, and Mon-Fri vs seven-day service
+via :func:`src.cost.smartq_cost.working_days_for`). They stay editable
+here, and a manual edit survives until the setup itself changes.
+
 Session-state keys are prefixed ``sq_``.
 """
 
@@ -27,6 +32,7 @@ import streamlit as st
 
 from src.cost.smartq_cost import (
     DEFAULT_SELLING_MARKUP_PCT,
+    working_days_for,
     MIN_MARKUP_PCT,
     DEFAULT_SELLING_PAX,
     DEFAULT_WORKING_DAYS,
@@ -122,6 +128,23 @@ def _seed_state(overall_per_plate: float) -> None:
         ss.sq_markup_pct = DEFAULT_SELLING_MARKUP_PCT
         for key, _label, default, _cadence, _divisor in SMARTQ_COST_LINES:
             ss[f"sq_{key}_pct"] = default
+
+    # Head count and service days belong to the client, not to this tab —
+    # the Cost Estimator setup asks for both, so they arrive from there
+    # rather than being retyped per estimate. Only re-applied when the
+    # setup itself changes, so an operator's edit here isn't overwritten
+    # on every rerun.
+    setup = ss.get("estimate_setup") or {}
+    if setup:
+        signature = (
+            setup.get("pax_per_day"),
+            working_days_for(bool(setup.get("serve_weekends"))),
+        )
+        if ss.get("sq_setup_signature") != signature:
+            ss.sq_setup_signature = signature
+            if signature[0]:
+                ss.sq_selling_pax = int(signature[0])
+            ss.sq_working_days = int(signature[1])
 
     # The overall cost moves whenever the vendor tab's food share does, so
     # the price is re-derived from the (unchanged) markup — the markup is
